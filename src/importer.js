@@ -1,138 +1,72 @@
-/* Layout: dark stadium bar on top, division rail, one working panel per tab; leaderboard reads like a timing board */
-:root{
-  --bg:#EDF0F2; --surface:#FFFFFF; --sunk:#F5F7F8; --ink:#15212C; --muted:#5B6874; --line:#D3D9DE;
-  --bar:#15212C; --bar-ink:#F2F5F7; --bar-muted:#9AA8B5;
-  --accent:#D9442B; --accent-ink:#FFFFFF; --accent-soft:#FBE4DF;
-  --gold:#C3961B; --silver:#8794A1; --bronze:#A5683B; --ok:#2B8A55; --warn:#B7791F;
-  --f-display:"Big Shoulders Display","Arial Narrow",Impact,sans-serif;
-  --f-body:"Barlow","Segoe UI",system-ui,sans-serif;
-  --f-mono:"JetBrains Mono",ui-monospace,Menlo,monospace;
+// Reads athlete lists pasted from Excel / Google Sheets (tab-separated) or CSV files.
+
+export function parseTable(text) {
+  text = String(text || '').replace(/^﻿/, '');
+  const first = text.split(/\r?\n/).find(l => l.trim()) || '';
+  const delim = first.includes('\t') ? '\t'
+    : first.split(';').length > first.split(',').length ? ';' : ',';
+  const rows = [];
+  let row = [], cell = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) {
+      if (c === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; }
+      else cell += c;
+    } else if (c === '"' && cell.trim() === '') { q = true; cell = ''; }
+    else if (c === delim) { row.push(cell); cell = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(cell); rows.push(row); row = []; cell = '';
+    } else cell += c;
+  }
+  row.push(cell); rows.push(row);
+  return rows.map(r => r.map(c => c.trim())).filter(r => r.some(c => c));
 }
-@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
-  --bg:#0E151C; --surface:#16212B; --sunk:#111A22; --ink:#E6ECF1; --muted:#93A1AE; --line:#27343F;
-  --bar:#080D12; --bar-ink:#EEF2F5; --bar-muted:#8796A3;
-  --accent:#FF6A4D; --accent-ink:#1A0A06; --accent-soft:#3A1F19;
-  --gold:#E3B83E; --silver:#AEBAC6; --bronze:#CC8A57; --ok:#4CC184; --warn:#E0A84A; color-scheme:dark}}
-:root[data-theme="dark"]{
-  --bg:#0E151C; --surface:#16212B; --sunk:#111A22; --ink:#E6ECF1; --muted:#93A1AE; --line:#27343F;
-  --bar:#080D12; --bar-ink:#EEF2F5; --bar-muted:#8796A3;
-  --accent:#FF6A4D; --accent-ink:#1A0A06; --accent-soft:#3A1F19;
-  --gold:#E3B83E; --silver:#AEBAC6; --bronze:#CC8A57; --ok:#4CC184; --warn:#E0A84A; color-scheme:dark}
-html,body{background:var(--bg);color:var(--ink)}
-body{font-family:var(--f-body);font-size:16px;line-height:1.45}
-.wrap{padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));max-width:1180px;margin:0 auto}
-button,input,select,textarea{font:inherit;color:inherit}
-:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
 
-/* top bar */
-.bar{background:var(--bar);color:var(--bar-ink)}
-.bar .wrap{display:flex;align-items:center;gap:12px;padding-block:14px;flex-wrap:wrap}
-.event{font-family:var(--f-display);font-weight:900;font-size:clamp(1.6rem,4vw,2.3rem);letter-spacing:.02em;text-transform:uppercase;line-height:1;text-wrap:balance;flex:1;min-width:0}
-.sync{display:inline-flex;align-items:center;gap:6px;font-size:.78rem;letter-spacing:.08em;text-transform:uppercase;color:var(--bar-muted);font-weight:600}
-.sync i{width:8px;height:8px;border-radius:50%;background:var(--bar-muted)}
-.sync.on i{background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 30%,transparent)}
-.tabs{display:flex;gap:4px;overflow-x:auto}
-.tabs .wrap{display:flex;gap:4px;padding-block:0}
-.tab{background:none;border:0;color:var(--bar-muted);padding:12px 14px 10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;font-size:.85rem;border-bottom:3px solid transparent;cursor:pointer;white-space:nowrap}
-.tab[aria-selected="true"]{color:var(--bar-ink);border-color:var(--accent)}
+const isNumberish = s => /^#?\d+[a-z]?$/i.test(String(s || '').trim());
+const cleanBib = s => String(s || '').trim().replace(/^#/, '');
 
-/* division rail */
-.rail{border-bottom:1px solid var(--line);background:var(--surface)}
-.rail .wrap{display:flex;gap:8px;padding-block:10px;overflow-x:auto;align-items:center}
-.rail .lbl{font-size:.72rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-right:4px;white-space:nowrap}
-.chip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);background:var(--sunk);border-radius:999px;padding:7px 14px;font-weight:600;cursor:pointer;white-space:nowrap;font-size:.95rem}
-.chip[aria-pressed="true"]{background:var(--ink);color:var(--bg);border-color:var(--ink)}
-.pill{font-size:.66rem;font-weight:800;letter-spacing:.1em;text-transform:uppercase;padding:2px 7px;border-radius:4px;line-height:1.4}
-.pill.live{background:var(--accent);color:var(--accent-ink)}
-.pill.final{background:var(--ink);color:var(--bg)}
-.chip[aria-pressed="true"] .pill.final{background:var(--bg);color:var(--ink)}
-.pill.upcoming{border:1px solid currentColor;opacity:.7}
+export function mapColumns(rows) {
+  const H = rows[0].map(c => c.toLowerCase().replace(/[^a-z0-9# ]/g, ' ').replace(/\s+/g, ' ').trim());
+  const find = re => H.findIndex(h => re.test(h));
+  const hasHeader = H.some(h => /\b(name|athlete|competitor|participant|bib|division|first|last)\b/.test(h));
 
-main{padding-block:20px 60px}
-h2{font-family:var(--f-display);font-weight:800;text-transform:uppercase;letter-spacing:.02em;font-size:clamp(1.6rem,3.6vw,2.2rem);line-height:1.05;margin:0;text-wrap:balance}
-h3{font-family:var(--f-display);font-weight:800;text-transform:uppercase;letter-spacing:.03em;font-size:1.25rem;margin:0}
-.muted{color:var(--muted)}
-.head{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px}
-.head .sub{font-size:.9rem;color:var(--muted);margin-top:4px}
-.seg{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
-.seg button{border:1px solid var(--line);background:var(--surface);padding:8px 14px;border-radius:8px;font-weight:600;cursor:pointer}
-.seg button[aria-pressed="true"]{border-color:var(--accent);background:var(--accent-soft);color:var(--ink);box-shadow:inset 0 -3px 0 var(--accent)}
+  let idx;
+  if (hasHeader) {
+    idx = {
+      name: find(/^(name|full name|athlete|athlete name|competitor|competitor name|participant|participant name|ninja|ninja name)$/),
+      first: find(/^(first|first name|firstname|given name)$/),
+      last: find(/^(last|last name|lastname|surname|family name)$/),
+      bib: find(/^(bib|bib number|bib no|bib #|number|no|#|num|race number)$/),
+      div: find(/^(division|div|class|category|age group|agegroup|level|group)$/),
+      flight: find(/^(flight|flight number|flight no|flight #|flt|heat|wave)$/),
+    };
+    if (idx.name < 0 && idx.first < 0) {
+      idx.name = find(/name/); // e.g. "Athlete's Name"
+      if (idx.name < 0) return { error: "Couldn't find a Name column. Add a header row with a column called Name (or First Name and Last Name)." };
+    }
+    rows = rows.slice(1);
+  } else {
+    // No header: [bib,] name [, division [, flight]]
+    const r0 = rows[0];
+    if (r0.length >= 2 && isNumberish(r0[0])) idx = { bib: 0, name: 1, div: r0.length > 2 ? 2 : -1, flight: r0.length > 3 ? 3 : -1, first: -1, last: -1 };
+    else if (r0.length >= 2 && isNumberish(r0[1])) idx = { name: 0, bib: 1, div: r0.length > 2 ? 2 : -1, flight: r0.length > 3 ? 3 : -1, first: -1, last: -1 };
+    else idx = { name: 0, bib: -1, div: r0.length > 1 ? 1 : -1, flight: -1, first: -1, last: -1 };
+  }
 
-/* leaderboard */
-.scroll{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--surface)}
-table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
-th{font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:700;text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);white-space:nowrap;background:var(--sunk)}
-td{padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:middle}
-tr:last-child td{border-bottom:0}
-th.num,td.num{text-align:right}
-.rank{font-family:var(--f-display);font-weight:900;font-size:1.7rem;line-height:1;width:58px}
-.rank span{display:inline-grid;place-items:center;min-width:44px;height:44px;border-radius:8px}
-tr.r1 .rank span{background:var(--gold);color:#1B1300}
-tr.r2 .rank span{background:var(--silver);color:#0F1418}
-tr.r3 .rank span{background:var(--bronze);color:#1A0E05}
-.name{font-weight:700;font-size:1.08rem}
-.bib{font-family:var(--f-mono);font-size:.78rem;color:var(--muted);margin-right:6px}
-.total{font-family:var(--f-display);font-weight:900;font-size:1.8rem;line-height:1}
-.time{font-family:var(--f-mono);font-weight:700;font-size:1.05rem}
-.cell{font-family:var(--f-mono);font-size:.82rem;white-space:nowrap}
-.cell b{font-size:.95rem}
-.cell small{color:var(--muted)}
-.tie{font-size:.68rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--warn);margin-left:6px}
+  const get = (r, i) => (i >= 0 ? (r[i] || '').trim() : '');
+  const records = rows.map(r => {
+    let name = get(r, idx.name);
+    if (!name && (idx.first >= 0 || idx.last >= 0)) name = [get(r, idx.first), get(r, idx.last)].filter(Boolean).join(' ');
+    return { name: name.replace(/\s+/g, ' '), bib: cleanBib(get(r, idx.bib)), division: get(r, idx.div), flight: get(r, idx.flight) };
+  });
 
-/* forms */
-.panel{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:16px;display:grid;gap:12px;min-width:0}
-.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr));gap:16px;align-items:start}
-.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-.row>*{min-width:0}
-label.f{display:grid;gap:4px;font-size:.75rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
-input[type=text],input:not([type]),select,textarea{border:1px solid var(--line);background:var(--sunk);border-radius:8px;padding:10px 12px;font-size:1rem;min-width:0;width:100%}
-textarea{min-height:110px;resize:vertical;font-family:var(--f-mono);font-size:.9rem}
-input.bad{border-color:var(--accent);background:var(--accent-soft)}
-.btn{border:0;background:var(--accent);color:var(--accent-ink);font-weight:700;padding:10px 16px;border-radius:8px;cursor:pointer;white-space:nowrap}
-.btn.ghost{background:none;border:1px solid var(--line);color:var(--ink)}
-.btn.danger{background:none;border:1px solid var(--line);color:var(--accent)}
-.btn.armed{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
-.btn:disabled{opacity:.45;cursor:not-allowed}
-.list{display:grid;gap:8px}
-.item{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--sunk)}
-.item input{flex:1 1 160px}
+  const found = [
+    idx.name >= 0 ? 'Name' : idx.first >= 0 ? 'First + Last name' : null,
+    idx.bib >= 0 ? 'Bib' : null,
+    idx.div >= 0 ? 'Division' : null,
+    idx.flight >= 0 ? 'Flight' : null,
+  ].filter(Boolean).join(', ') + (hasHeader ? '' : ' (no header row, guessed by position)');
 
-/* judge sheet */
-.sheet td{padding:8px 10px}
-.sheet input{font-family:var(--f-mono);font-size:1.2rem;font-weight:700;text-align:center;padding:10px 8px;width:100%;min-width:72px}
-.sheet .pcol{width:110px}
-.sheet .tcol{width:150px}
-.state{width:28px;text-align:center}
-.dot{display:inline-block;width:12px;height:12px;border-radius:50%;border:2px solid var(--line)}
-.dot.ok{background:var(--ok);border-color:var(--ok)}
-.dot.busy{background:var(--warn);border-color:var(--warn)}
-
-.empty{border:2px dashed var(--line);border-radius:12px;padding:28px 20px;text-align:center;display:grid;gap:10px;justify-items:center;color:var(--muted)}
-.empty strong{color:var(--ink);font-size:1.1rem}
-.note{font-size:.88rem;color:var(--muted);max-width:65ch}
-.banner{background:var(--accent-soft);border:1px solid var(--accent);border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:.92rem}
-.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(20px + env(safe-area-inset-bottom,0px));background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:8px;font-weight:600;box-shadow:0 6px 24px rgba(0,0,0,.25);max-width:calc(100% - 32px);z-index:9}
-@media (max-width:640px){.hide-sm{display:none}.rank{width:44px}.rank span{min-width:36px;height:36px}.total{font-size:1.4rem}}
-@media (prefers-reduced-motion:no-preference){tr{transition:background .3s}.flash td{background:var(--accent-soft)}}
-
-/* Supabase build additions */
-.auth-btn{color:var(--bar-ink)!important;border-color:color-mix(in srgb,var(--bar-ink) 30%,transparent)!important;padding:6px 12px}
-input[type=email],input[type=password]{border:1px solid var(--line);background:var(--sunk);border-radius:8px;padding:10px 12px;font-size:1rem;min-width:0;width:100%}
-html,body{margin:0}
-:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
-[hidden]{display:none!important}
-
-/* import + one-course-per-division */
-.grid2>.import{grid-column:1/-1}
-.span2{grid-column:1/-1}
-.file-btn{display:inline-flex;align-items:center;cursor:pointer;align-self:flex-end}
-.import .row{align-items:flex-end}
-.summary{display:grid;gap:4px;padding:12px 14px;border-radius:8px;background:var(--sunk);border:1px solid var(--line)}
-.preview{max-height:360px;overflow:auto}
-.preview td{padding:6px 12px}
-tr.skip td{color:var(--muted);text-decoration:line-through}
-tr.skip td:last-child{text-decoration:none}
-.tag{font-size:.68rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase;padding:2px 7px;border-radius:4px;border:1px solid var(--line);color:var(--muted);white-space:nowrap}
-.tag.new{border-color:var(--accent);color:var(--accent)}
-.div-item{align-items:flex-end}
-.div-item label.f input{width:100%}
+  return { records, found };
+}
