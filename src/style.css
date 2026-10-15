@@ -116,7 +116,6 @@ input.bad{border-color:var(--accent);background:var(--accent-soft)}
 @media (prefers-reduced-motion:no-preference){tr{transition:background .3s}.flash td{background:var(--accent-soft)}}
 
 /* Supabase build additions */
-.auth-btn{color:var(--bar-ink)!important;border-color:color-mix(in srgb,var(--bar-ink) 30%,transparent)!important;padding:6px 12px}
 input[type=email],input[type=password]{border:1px solid var(--line);background:var(--sunk);border-radius:8px;padding:10px 12px;font-size:1rem;min-width:0;width:100%}
 html,body{margin:0}
 :root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
@@ -136,3 +135,8 @@ tr.skip td:last-child{text-decoration:none}
 .tag.new{border-color:var(--accent);color:var(--accent)}
 .div-item{align-items:flex-end}
 .div-item label.f input{width:100%}
+
+/* flights */
+.sheet tr.group td,.preview tr.group td{background:var(--sunk);font-family:var(--f-display);font-weight:800;text-transform:uppercase;letter-spacing:.06em;font-size:1rem;padding:8px 12px}
+.list-head{font-family:var(--f-display);font-weight:800;text-transform:uppercase;letter-spacing:.06em;font-size:1.05rem;margin-top:8px}
+.seg small{font-family:var(--f-mono);font-weight:500;margin-left:4px}
