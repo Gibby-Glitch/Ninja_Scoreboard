@@ -14,9 +14,13 @@ const LS = {
   set(k, v) { try { localStorage.setItem('ninja.' + k, JSON.stringify(v)); } catch { /* ignore */ } },
 };
 const byOrder = (a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || String(a.name).localeCompare(b.name);
-const bibNum = b => { const n = parseFloat(b); return isNaN(n) ? Infinity : n; };
-const byBib = (a, b) => bibNum(a.bib) - bibNum(b.bib) || String(a.bib || '').localeCompare(String(b.bib || '')) || String(a.name).localeCompare(b.name);
+const numKey = v => { const n = parseFloat(v); return isNaN(n) ? Infinity : n; };
+const cmpText = (a, b) => numKey(a) - numKey(b) || String(a || '').localeCompare(String(b || ''));
+const byBib = (a, b) => cmpText(a.bib, b.bib) || String(a.name).localeCompare(b.name);
+const byFlightBib = (a, b) => (a.flight ? 0 : 1) - (b.flight ? 0 : 1) || cmpText(a.flight, b.flight) || byBib(a, b);
 const norm = s => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+const cleanFlight = s => String(s || '').trim().replace(/^(flight|flt|heat|wave)\s*#?\s*/i, '');
+const flightLabel = f => (f ? `Flight ${f}` : 'No flight');
 
 export function parseTime(s) {
   s = String(s).trim(); if (!s) return null;
@@ -33,13 +37,11 @@ const num = v => (v == null ? null : Number(v));
 
 /* ---------- state ---------- */
 const S = {
-  event: {}, divisions: [], athletes: [], runs: [],
-  loaded: false, session: null,
-  tab: LS.get('tab', 'board'), viewDiv: LS.get('viewDiv', null),
+  event: {}, divisions: [], athletes: [], runs: [], loaded: false,
+  tab: LS.get('tab', 'board'), viewDiv: LS.get('viewDiv', null), judgeFlight: LS.get('judgeFlight', 'all'),
   search: '', pendingMain: false, saving: new Set(), runsDiv: undefined,
   importText: '', importDiv: null, preview: null, importing: false,
 };
-const canWrite = () => !!S.session;
 
 function toast(msg) {
   const t = $('#toast'); t.textContent = msg; t.hidden = false;
@@ -49,7 +51,6 @@ function setSync(on, text) { const s = $('#sync'); s.classList.toggle('on', on);
 
 async function write(fn, ok) {
   if (!sb) { toast('Supabase is not configured.'); return false; }
-  if (!canWrite()) { toast('Sign in as a judge to record or change anything.'); setTab('signin'); return false; }
   try {
     const res = await fn();
     const err = Array.isArray(res) ? res.find(r => r && r.error)?.error : res && res.error;
@@ -57,17 +58,18 @@ async function write(fn, ok) {
     if (ok) toast(ok);
     return true;
   } catch (e) {
-    toast('Could not save: ' + (e?.message || 'try again'));
+    toast('Could not save: ' + (e?.message || 'check the connection and try again'));
     return false;
   }
 }
 
 const activeDiv = () => S.divisions.find(d => d.id === S.event.active_division_id) || null;
 const viewDiv = () => S.divisions.find(d => d.id === S.viewDiv) || activeDiv() || [...S.divisions].sort(byOrder)[0] || null;
-const divAthletes = id => S.athletes.filter(a => a.division_id === id).sort(byBib);
+const divAthletes = id => S.athletes.filter(a => a.division_id === id).sort(byFlightBib);
+const divFlights = id => [...new Set(divAthletes(id).map(a => a.flight || ''))].sort((a, b) => (a ? 0 : 1) - (b ? 0 : 1) || cmpText(a, b));
 const courseName = d => (d && d.course_name) || 'Course';
 
-/* ---------- standings: most points wins, ties broken by fastest time ---------- */
+/* ---------- standings: overall per division, most points wins, ties broken by fastest time ---------- */
 export function standings(divId) {
   const runBy = {};
   for (const r of S.runs) if (r.division_id === divId) runBy[r.athlete_id] = r;
@@ -94,9 +96,6 @@ function render() {
   $('#eventName').textContent = S.event.name || 'Ninja Tournament';
   document.title = S.event.name || 'Ninja Tournament Scoreboard';
   document.querySelectorAll('.tab').forEach(t => t.setAttribute('aria-selected', String(t.dataset.tab === S.tab)));
-  const ab = $('#authBtn');
-  ab.hidden = !sb;
-  ab.textContent = S.session ? 'Sign out' : 'Judge sign in';
   renderRail();
   syncRunsDivision();
   if (isEditing() && S.tab !== 'board') { S.pendingMain = true; return; }
@@ -121,20 +120,8 @@ function renderMain() {
     return;
   }
   if (!S.loaded) return;
-  if (S.tab === 'signin') { m.innerHTML = signInView(); return; }
-  const ro = !canWrite() && S.tab !== 'board'
-    ? `<div class="banner">View only. <button class="btn ghost" data-act="tab" data-tab="signin" style="padding:4px 10px;margin-left:6px">Judge sign in</button> to record scores or change setup.</div>` : '';
-  m.innerHTML = ro + ({ board: boardView, judge: judgeView, athletes: athletesView, setup: setupView }[S.tab] || boardView)();
+  m.innerHTML = ({ board: boardView, judge: judgeView, athletes: athletesView, setup: setupView }[S.tab] || boardView)();
   if (S.tab === 'judge') applySearch();
-}
-
-function signInView() {
-  if (S.session) return `<div class="panel" style="max-width:420px"><h3>Signed in</h3><p class="note">${esc(S.session.user.email)}</p><div><button class="btn" data-act="tab" data-tab="judge">Go to judging</button></div></div>`;
-  return `<form class="panel" data-form="signin" style="max-width:420px"><h3>Judge sign in</h3>
-    <span class="note">Use the judge account the organizer created for you.</span>
-    <label class="f">Email<input id="siEmail" type="email" autocomplete="username" required></label>
-    <label class="f">Password<input id="siPass" type="password" autocomplete="current-password" required></label>
-    <div class="row"><button class="btn">Sign in</button><button type="button" class="btn ghost" data-act="tab" data-tab="board">Back to winners</button></div></form>`;
 }
 
 function boardView() {
@@ -142,12 +129,14 @@ function boardView() {
   if (!d) return `<div class="empty"><strong>Set up the event first</strong><span>Add your divisions in Setup, then enter athletes. Winners appear here as judges record runs.</span><button class="btn" data-act="tab" data-tab="setup">Go to Setup</button></div>`;
   const rows = standings(d.id);
   const total = divAthletes(d.id).length;
+  const hasFlights = divFlights(d.id).some(Boolean);
   const live = d.id === S.event.active_division_id, final = !live && d.status === 'final';
-  let h = `<div class="head"><div><h2>${esc(d.name)} · ${final ? 'Final results' : 'Live standings'}</h2><div class="sub">${esc(courseName(d))} · ${rows.length} of ${total} athletes have run · most points wins, fastest time breaks ties</div></div></div>`;
+  let h = `<div class="head"><div><h2>${esc(d.name)} · ${final ? 'Final results' : 'Overall standings'}</h2><div class="sub">${esc(courseName(d))} · ${rows.length} of ${total} athletes have run${hasFlights ? ', all flights combined' : ''} · most points wins, fastest time breaks ties</div></div></div>`;
   if (!rows.length) return h + `<div class="empty"><strong>No runs recorded yet</strong><span>When a judge saves points and a time on the Judge tab, this board fills in on every device.</span></div>`;
-  h += `<div class="scroll"><table><thead><tr><th>Place</th><th>Athlete</th><th class="num">Points</th><th class="num">Time</th></tr></thead><tbody>`;
+  h += `<div class="scroll"><table><thead><tr><th>Place</th><th>Athlete</th>${hasFlights ? '<th class="hide-sm">Flight</th>' : ''}<th class="num">Points</th><th class="num">Time</th></tr></thead><tbody>`;
   for (const r of rows.slice(0, 20)) {
     h += `<tr class="r${r.rank}"><td class="rank"><span>${r.rank}</span></td><td><span class="bib">${r.a.bib ? '#' + esc(r.a.bib) : ''}</span><span class="name">${esc(r.a.name)}</span>${r.timeBreak ? '<span class="tie">Tie · time</span>' : ''}</td>`;
+    if (hasFlights) h += `<td class="hide-sm muted">${r.a.flight ? esc(r.a.flight) : '—'}</td>`;
     h += `<td class="num total">${fmtPts(r.pts)}</td><td class="num time">${fmtTime(r.time)}</td></tr>`;
   }
   h += '</tbody></table></div>';
@@ -158,18 +147,30 @@ function boardView() {
 function judgeView() {
   const d = viewDiv();
   if (!d) return `<div class="empty"><strong>Nothing to judge yet</strong><span>Add a division in Setup.</span><button class="btn" data-act="tab" data-tab="setup">Go to Setup</button></div>`;
-  const as = divAthletes(d.id);
-  const dis = canWrite() ? '' : 'disabled';
-  let h = `<div class="head"><div><h2>Judge · ${esc(courseName(d))}</h2><div class="sub">${esc(d.name)} · type points and time, then tap Return or the next box to save</div></div></div>`;
+  const flights = divFlights(d.id);
+  if (S.judgeFlight !== 'all' && !flights.includes(S.judgeFlight)) S.judgeFlight = 'all';
+  const as = divAthletes(d.id).filter(a => S.judgeFlight === 'all' || (a.flight || '') === S.judgeFlight);
+  let h = `<div class="head"><div><h2>Judge · ${esc(courseName(d))}</h2><div class="sub">${esc(d.name)}${S.judgeFlight !== 'all' ? ' · ' + esc(flightLabel(S.judgeFlight)) : ''} · type points and time, then tap Return or the next box to save</div></div></div>`;
+  if (flights.length > 1 || flights[0]) {
+    h += `<div class="seg" role="group" aria-label="Flight"><button data-act="judge-flight" data-id="all" aria-pressed="${S.judgeFlight === 'all'}">All flights</button>${flights.map(f => {
+      const fa = divAthletes(d.id).filter(a => (a.flight || '') === f), done = fa.filter(a => S.runs.some(r => r.athlete_id === a.id)).length;
+      return `<button data-act="judge-flight" data-id="${esc(f)}" aria-pressed="${S.judgeFlight === f}">${esc(flightLabel(f))} <small class="muted">${done}/${fa.length}</small></button>`;
+    }).join('')}</div>`;
+  }
   if (!as.length) return h + `<div class="empty"><strong>No athletes in ${esc(d.name)}</strong><span>Add or import athletes on the Athletes tab.</span><button class="btn" data-act="tab" data-tab="athletes">Add athletes</button></div>`;
   h += `<div class="row" style="margin-bottom:12px"><input id="search" placeholder="Find athlete by name or bib" value="${esc(S.search)}" autocomplete="off" style="max-width:360px"></div>`;
   h += `<div class="scroll"><table class="sheet"><thead><tr><th>Athlete</th><th class="pcol">Points</th><th class="tcol">Time</th><th class="state"><span class="hide-sm">Saved</span></th></tr></thead><tbody>`;
+  let lastFlight = null;
   for (const a of as) {
+    if (S.judgeFlight === 'all' && (flights.length > 1 || flights[0]) && (a.flight || '') !== lastFlight) {
+      lastFlight = a.flight || '';
+      h += `<tr class="group"><td colspan="4">${esc(flightLabel(lastFlight))}</td></tr>`;
+    }
     const r = S.runs.find(x => x.athlete_id === a.id);
     const busy = S.saving.has(a.id);
     h += `<tr data-aid="${a.id}" data-q="${esc((a.name + ' ' + (a.bib || '')).toLowerCase())}"><td><span class="bib">${a.bib ? '#' + esc(a.bib) : ''}</span><span class="name">${esc(a.name)}</span></td>
-    <td><input id="p_${a.id}" class="pts" inputmode="decimal" autocomplete="off" aria-label="Points for ${esc(a.name)}" value="${r ? esc(fmtPts(Number(r.points) || 0)) : ''}" ${dis}></td>
-    <td><input id="t_${a.id}" class="tm" inputmode="decimal" autocomplete="off" placeholder="0:00.00" aria-label="Time for ${esc(a.name)}" value="${r && r.time_sec != null ? fmtTime(num(r.time_sec)) : ''}" ${dis}></td>
+    <td><input id="p_${a.id}" class="pts" inputmode="decimal" autocomplete="off" aria-label="Points for ${esc(a.name)}" value="${r ? esc(fmtPts(Number(r.points) || 0)) : ''}"></td>
+    <td><input id="t_${a.id}" class="tm" inputmode="decimal" autocomplete="off" placeholder="0:00.00" aria-label="Time for ${esc(a.name)}" value="${r && r.time_sec != null ? fmtTime(num(r.time_sec)) : ''}"></td>
     <td class="state"><span class="dot ${busy ? 'busy' : r ? 'ok' : ''}" title="${r ? 'Saved' : 'Not recorded'}"></span></td></tr>`;
   }
   h += '</tbody></table></div><p class="note">Time can be entered as 1:23.45 or 83.45 seconds. Clear both boxes to remove a run.</p>';
@@ -177,7 +178,8 @@ function judgeView() {
 }
 function applySearch() {
   const q = S.search.trim().toLowerCase();
-  document.querySelectorAll('.sheet tbody tr').forEach(tr => (tr.hidden = !!q && !tr.dataset.q.includes(q)));
+  document.querySelectorAll('.sheet tbody tr[data-aid]').forEach(tr => (tr.hidden = !!q && !tr.dataset.q.includes(q)));
+  document.querySelectorAll('.sheet tbody tr.group').forEach(tr => (tr.hidden = !!q));
 }
 
 function divOptions(sel) {
@@ -185,15 +187,14 @@ function divOptions(sel) {
 }
 
 function importPanel(d) {
-  const dis = canWrite() ? '' : 'disabled';
   const p = S.preview;
   let h = `<div class="panel import"><h3>Import from Excel or Google Sheets</h3>
-    <span class="note">Copy the rows in your spreadsheet (include the header row) and paste them below, or choose a CSV file. Columns it understands: <b>Name</b> (or First + Last), <b>Bib</b>, <b>Division</b>.</span>
-    <textarea id="importText" placeholder="Bib&#9;Name&#9;Division&#10;12&#9;Maya Ortiz&#9;Division A&#10;13&#9;Jordan Lee&#9;Division B">${esc(S.importText)}</textarea>
+    <span class="note">Copy the rows in your spreadsheet (include the header row) and paste them below, or choose a CSV file. Columns it understands: <b>Name</b> (or First + Last), <b>Bib</b>, <b>Division</b>, <b>Flight</b>.</span>
+    <textarea id="importText" placeholder="Bib&#9;Name&#9;Division&#9;Flight&#10;12&#9;Maya Ortiz&#9;Division A&#9;1&#10;13&#9;Jordan Lee&#9;Division A&#9;2">${esc(S.importText)}</textarea>
     <div class="row">
-      <label class="btn ghost file-btn">Choose CSV file<input id="importFile" type="file" accept=".csv,.tsv,.txt,text/csv" hidden ${dis}></label>
+      <label class="btn ghost file-btn">Choose CSV file<input id="importFile" type="file" accept=".csv,.tsv,.txt,text/csv" hidden></label>
       <label class="f" style="flex:1 1 200px">Athletes with no division go into<select id="importDiv">${divOptions(S.importDiv || d.id)}</select></label>
-      <button class="btn" data-act="import-preview" ${dis}>Preview</button>
+      <button class="btn" data-act="import-preview">Preview</button>
     </div>`;
   if (p) {
     if (p.error) h += `<div class="banner">${esc(p.error)}</div>`;
@@ -205,7 +206,7 @@ function importPanel(d) {
       if (bad.length) h += ` ${bad.length} rows have no name and will be skipped.`;
       if (newDivs.length) h += ` New ${newDivs.length === 1 ? 'division' : 'divisions'} will be created: ${newDivs.map(esc).join(', ')}.`;
       h += `<div class="muted" style="font-size:.85rem">Columns found: ${esc(p.found)}</div></div>`;
-      h += `<div class="scroll preview"><table><thead><tr><th>Bib</th><th>Name</th><th>Division</th><th></th></tr></thead><tbody>${p.items.slice(0, 300).map(i => `<tr class="${i.dup || i.bad ? 'skip' : ''}"><td class="bib">${esc(i.bib)}</td><td>${esc(i.name) || '<span class="muted">(blank)</span>'}</td><td>${esc(i.divName)}</td><td>${i.bad ? '<span class="tag">Skip</span>' : i.dup ? '<span class="tag">Already entered</span>' : i.newDiv ? '<span class="tag new">New division</span>' : ''}</td></tr>`).join('')}</tbody></table></div>`;
+      h += `<div class="scroll preview"><table><thead><tr><th>Bib</th><th>Name</th><th>Division</th><th>Flight</th><th></th></tr></thead><tbody>${p.items.slice(0, 300).map(i => `<tr class="${i.dup || i.bad ? 'skip' : ''}"><td class="bib">${esc(i.bib)}</td><td>${esc(i.name) || '<span class="muted">(blank)</span>'}</td><td>${esc(i.divName)}</td><td>${esc(i.flight)}</td><td>${i.bad ? '<span class="tag">Skip</span>' : i.dup ? '<span class="tag">Already entered</span>' : i.newDiv ? '<span class="tag new">New division</span>' : ''}</td></tr>`).join('')}</tbody></table></div>`;
       if (p.items.length > 300) h += `<span class="note">Showing the first 300 of ${p.items.length} rows.</span>`;
       h += `<div class="row"><button class="btn" data-act="import-run" ${ready.length && !S.importing ? '' : 'disabled'}>${S.importing ? 'Importing…' : `Import ${ready.length} athletes`}</button><button class="btn ghost" data-act="import-cancel">Cancel</button></div>`;
     }
@@ -217,35 +218,42 @@ function athletesView() {
   const d = viewDiv();
   if (!d) return `<div class="empty"><strong>Add a division first</strong><span>Athletes are entered into a division.</span><button class="btn" data-act="tab" data-tab="setup">Go to Setup</button></div>`;
   const as = divAthletes(d.id);
-  const dis = canWrite() ? '' : 'disabled';
-  let h = `<div class="head"><div><h2>Athletes · ${esc(d.name)}</h2><div class="sub">${as.length} entered in this division · ${S.athletes.length} total. Switch divisions with the bar above.</div></div></div><div class="grid2">`;
+  const flights = divFlights(d.id);
+  let h = `<div class="head"><div><h2>Athletes · ${esc(d.name)}</h2><div class="sub">${as.length} in this division${flights.some(Boolean) ? ` across ${flights.filter(Boolean).length} flights` : ''} · ${S.athletes.length} total. Switch divisions with the bar above.</div></div></div><div class="grid2">`;
   h += importPanel(d);
   h += `<form class="panel" data-form="add-athlete"><h3>Add one athlete</h3>
-    <div class="row"><label class="f" style="flex:0 0 90px">Bib<input id="newBib" autocomplete="off"></label><label class="f" style="flex:1 1 180px">Name<input id="newName" autocomplete="off" required></label></div>
-    <label class="f">Division<select id="newDiv">${divOptions(d.id)}</select></label>
-    <div><button class="btn" ${dis}>Add athlete</button></div></form></div>`;
+    <div class="row"><label class="f" style="flex:0 0 80px">Bib<input id="newBib" autocomplete="off"></label><label class="f" style="flex:1 1 160px">Name<input id="newName" autocomplete="off" required></label></div>
+    <div class="row"><label class="f" style="flex:1 1 160px">Division<select id="newDiv">${divOptions(d.id)}</select></label><label class="f" style="flex:0 0 90px">Flight<input id="newFlight" inputmode="numeric" autocomplete="off" value="${S.judgeFlight !== 'all' ? esc(S.judgeFlight) : ''}"></label></div>
+    <div><button class="btn">Add athlete</button></div></form>`;
+  h += `<form class="panel" data-form="split"><h3>Split into flights</h3>
+    <span class="note">Puts the ${as.length} athletes in ${esc(d.name)} into flights in bib order. This replaces their current flights.</span>
+    <div class="row"><label class="f" style="flex:0 0 150px">Athletes per flight<input id="perFlight" inputmode="numeric" autocomplete="off" placeholder="10"></label><button class="btn ghost" ${as.length ? '' : 'disabled'}>Split into flights</button></div></form></div>`;
   if (!as.length) return h + `<div class="empty" style="margin-top:16px"><strong>No athletes in ${esc(d.name)} yet</strong><span>Import a list or add them one at a time above.</span></div>`;
-  h += `<div class="list" style="margin-top:16px">${as.map(a => `<div class="item"><input id="ab_${a.id}" data-edit="athlete-bib" data-id="${a.id}" value="${esc(a.bib || '')}" placeholder="Bib" style="flex:0 0 80px" aria-label="Bib" ${dis}><input id="an_${a.id}" data-edit="athlete-name" data-id="${a.id}" value="${esc(a.name)}" aria-label="Name" ${dis}><select id="ad_${a.id}" data-edit="athlete-div" data-id="${a.id}" style="flex:0 1 170px" aria-label="Division" ${dis}>${divOptions(a.division_id)}</select><button class="btn danger" data-act="del-athlete" data-id="${a.id}" ${dis}>Remove</button></div>`).join('')}</div>`;
-  return h;
+  h += '<div class="list" style="margin-top:16px">';
+  let last = null;
+  for (const a of as) {
+    if ((a.flight || '') !== last) { last = a.flight || ''; h += `<div class="list-head">${esc(flightLabel(last))} <span class="muted">· ${as.filter(x => (x.flight || '') === last).length}</span></div>`; }
+    h += `<div class="item"><input id="ab_${a.id}" data-edit="athlete-bib" data-id="${a.id}" value="${esc(a.bib || '')}" placeholder="Bib" style="flex:0 0 70px" aria-label="Bib"><input id="an_${a.id}" data-edit="athlete-name" data-id="${a.id}" value="${esc(a.name)}" aria-label="Name"><input id="af_${a.id}" data-edit="athlete-flight" data-id="${a.id}" value="${esc(a.flight || '')}" placeholder="Flight" inputmode="numeric" style="flex:0 0 70px" aria-label="Flight"><select id="ad_${a.id}" data-edit="athlete-div" data-id="${a.id}" style="flex:0 1 160px" aria-label="Division">${divOptions(a.division_id)}</select><button class="btn danger" data-act="del-athlete" data-id="${a.id}">Remove</button></div>`;
+  }
+  return h + '</div>';
 }
 
 function setupView() {
   const divs = [...S.divisions].sort(byOrder);
-  const dis = canWrite() ? '' : 'disabled';
   let h = `<div class="head"><div><h2>Event setup</h2><div class="sub">Changes here show up on every device right away.</div></div></div><div class="grid2">`;
-  h += `<div class="panel"><h3>Event</h3><label class="f">Event name<input id="evName" data-edit="event-name" value="${esc(S.event.name || '')}" placeholder="Fall Ninja Classic" ${dis}></label></div>`;
-  h += `<div class="panel span2"><h3>Divisions and courses</h3><span class="note">Each division runs one course. Set the division that's running now to Live. When it's done, mark it Final to lock its awards view, then make the next one Live.</span><div class="list">${divs.map(d => {
-    const live = d.id === S.event.active_division_id, n = S.athletes.filter(a => a.division_id === d.id).length;
+  h += `<div class="panel"><h3>Event</h3><label class="f">Event name<input id="evName" data-edit="event-name" value="${esc(S.event.name || '')}" placeholder="Fall Ninja Classic"></label></div>`;
+  h += `<div class="panel span2"><h3>Divisions and courses</h3><span class="note">Each division runs one course in one or more flights. Set the division that's running now to Live. When all its flights are done, mark it Final to lock its awards view, then make the next one Live.</span><div class="list">${divs.map(d => {
+    const live = d.id === S.event.active_division_id, n = S.athletes.filter(a => a.division_id === d.id).length, nf = divFlights(d.id).filter(Boolean).length;
     return `<div class="item div-item">
-      <label class="f" style="flex:1 1 160px">Division<input id="dn_${d.id}" data-edit="div-name" data-id="${d.id}" value="${esc(d.name)}" ${dis}></label>
-      <label class="f" style="flex:1 1 160px">Course<input id="dc_${d.id}" data-edit="div-course" data-id="${d.id}" value="${esc(d.course_name || '')}" placeholder="Course name" ${dis}></label>
-      <span class="muted" style="font-size:.85rem">${n} athletes</span>
-      ${live ? `<button class="btn" data-act="div-final" data-id="${d.id}" ${dis}>Mark final</button>` : `<button class="btn ghost" data-act="div-live" data-id="${d.id}" ${dis}>Make live</button>`}
-      ${!live && d.status === 'final' ? `<button class="btn ghost" data-act="div-reopen" data-id="${d.id}" ${dis}>Reopen</button>` : ''}
-      <button class="btn danger" data-act="del-div" data-id="${d.id}" ${n || !canWrite() ? 'disabled' : ''} ${n ? 'title="Move or remove its athletes first"' : ''}>Delete</button></div>`;
+      <label class="f" style="flex:1 1 160px">Division<input id="dn_${d.id}" data-edit="div-name" data-id="${d.id}" value="${esc(d.name)}"></label>
+      <label class="f" style="flex:1 1 160px">Course<input id="dc_${d.id}" data-edit="div-course" data-id="${d.id}" value="${esc(d.course_name || '')}" placeholder="Course name"></label>
+      <span class="muted" style="font-size:.85rem">${n} athletes${nf ? ` · ${nf} flights` : ''}</span>
+      ${live ? `<button class="btn" data-act="div-final" data-id="${d.id}">Mark final</button>` : `<button class="btn ghost" data-act="div-live" data-id="${d.id}">Make live</button>`}
+      ${!live && d.status === 'final' ? `<button class="btn ghost" data-act="div-reopen" data-id="${d.id}">Reopen</button>` : ''}
+      <button class="btn danger" data-act="del-div" data-id="${d.id}" ${n ? 'disabled title="Move or remove its athletes first"' : ''}>Delete</button></div>`;
   }).join('') || '<span class="muted">No divisions yet.</span>'}</div>
-    <form class="row" data-form="add-div"><input id="newDivName" placeholder="Division name" style="flex:1 1 160px" ${dis}><input id="newDivCourse" placeholder="Course name" style="flex:1 1 160px" ${dis}><button class="btn" ${dis}>Add division</button></form></div>`;
-  h += `<div class="panel"><h3>Using it on iPads and phones</h3><p class="note" style="margin:0">Open the site on every device. Judges sign in and score on the Judge tab. The Winners tab updates live on all screens, signed in or not. On iPad, Share → Add to Home Screen makes it open full screen.</p></div></div>`;
+    <form class="row" data-form="add-div"><input id="newDivName" placeholder="Division name" style="flex:1 1 160px"><input id="newDivCourse" placeholder="Course name" style="flex:1 1 160px"><button class="btn">Add division</button></form></div>`;
+  h += `<div class="panel"><h3>Using it on iPads and phones</h3><p class="note" style="margin:0">Open the site on every device. Judges score on the Judge tab and can pick their flight. The Winners tab shows the overall top 20 for the division and updates live on all screens. On iPad, Share → Add to Home Screen makes it open full screen.</p></div></div>`;
   return h;
 }
 
@@ -270,7 +278,7 @@ function buildPreview() {
     const key = (m ? m.id : 'new:' + norm(divName)) + '|' + norm(rec.name);
     const dup = !!rec.name && (existing.has(key) || seen.has(key));
     seen.add(key);
-    return { name: rec.name, bib: rec.bib, divName, divId: m ? m.id : null, newDiv: !m, dup, bad: !rec.name };
+    return { name: rec.name, bib: rec.bib, flight: cleanFlight(rec.flight), divName, divId: m ? m.id : null, newDiv: !m, dup, bad: !rec.name };
   });
   S.preview = { items, found: map.found };
 }
@@ -287,7 +295,7 @@ async function runImport() {
       if (r.error) return r;
       for (const d of r.data) ids[norm(d.name)] = d.id;
     }
-    const rows = ready.map(i => ({ name: i.name, bib: i.bib, division_id: i.divId || ids[norm(i.divName)] }));
+    const rows = ready.map(i => ({ name: i.name, bib: i.bib, flight: i.flight, division_id: i.divId || ids[norm(i.divName)] }));
     for (let k = 0; k < rows.length; k += 500) {
       const r = await sb.from('athletes').insert(rows.slice(k, k + 500));
       if (r.error) return r;
@@ -319,21 +327,17 @@ function syncRunsDivision() {
   const d = viewDiv(), id = d ? d.id : null;
   if (S.loaded && id !== S.runsDiv) { S.runs = []; loadRuns().then(render); }
 }
+const ALL = ['event', 'divisions', 'athletes', 'runs'];
 const reloadTimers = {};
 function scheduleReload(table) {
-  if (!['event', 'divisions', 'athletes', 'runs'].includes(table)) return;
+  if (!ALL.includes(table)) return;
   clearTimeout(reloadTimers[table]);
   reloadTimers[table] = setTimeout(async () => { await loadTable(table); render(); }, 150);
 }
-const ALL = ['event', 'divisions', 'athletes', 'runs'];
 
 async function start() {
   render();
   if (!sb) { setSync(false, 'Not set up'); renderMain(); return; }
-  const { data: { session } } = await sb.auth.getSession();
-  S.session = session;
-  sb.auth.onAuthStateChange((_e, s) => { S.session = s; render(); });
-
   await Promise.all(['event', 'divisions', 'athletes'].map(loadTable));
   await loadRuns();
   S.loaded = true;
@@ -351,7 +355,7 @@ async function start() {
 }
 
 /* ---------- actions ---------- */
-function setTab(t) { S.tab = t; if (t !== 'signin') LS.set('tab', t); S.search = ''; render(); }
+function setTab(t) { S.tab = t; LS.set('tab', t); S.search = ''; render(); }
 const nextOrder = list => list.reduce((m, x) => Math.max(m, x.sort_order ?? 0), 0) + 1;
 
 async function saveRun(aid) {
@@ -399,10 +403,6 @@ function arm(btn, label) { // two-tap confirm
 }
 
 document.addEventListener('click', async e => {
-  if (e.target.closest('#authBtn')) {
-    if (S.session) { await sb.auth.signOut(); toast('Signed out'); } else setTab('signin');
-    return;
-  }
   const b = e.target.closest('[data-act],.tab'); if (!b) return;
   if (b.classList.contains('tab')) { setTab(b.dataset.tab); return; }
   const id = b.dataset.id;
@@ -410,6 +410,7 @@ document.addEventListener('click', async e => {
     case 'tab': setTab(b.dataset.tab); break;
     case 'view-div': S.viewDiv = id === S.event.active_division_id ? null : id; LS.set('viewDiv', S.viewDiv); render(); break;
     case 'follow-live': S.viewDiv = null; LS.set('viewDiv', null); render(); break;
+    case 'judge-flight': S.judgeFlight = id; LS.set('judgeFlight', id); renderMain(); break;
     case 'import-preview': buildPreview(); renderMain(); break;
     case 'import-cancel': S.preview = null; renderMain(); break;
     case 'import-run': runImport(); break;
@@ -442,17 +443,22 @@ document.addEventListener('click', async e => {
 document.addEventListener('submit', async e => {
   const f = e.target.closest('[data-form]'); if (!f) return; e.preventDefault();
   const kind = f.dataset.form;
-  if (kind === 'signin') {
-    const { error } = await sb.auth.signInWithPassword({ email: $('#siEmail').value.trim(), password: $('#siPass').value });
-    if (error) { toast('Sign in failed: ' + error.message); return; }
-    toast('Signed in'); setTab('judge');
-  }
   if (kind === 'add-athlete') {
-    const name = $('#newName').value.trim(), bib = $('#newBib').value.trim(), div = $('#newDiv').value;
+    const name = $('#newName').value.trim(), bib = $('#newBib').value.trim(), div = $('#newDiv').value, flight = cleanFlight($('#newFlight').value);
     if (!name) { toast('Enter a name'); return; }
-    if (await write(() => sb.from('athletes').insert({ name, bib, division_id: div }), `Added ${name}`)) {
+    if (await write(() => sb.from('athletes').insert({ name, bib, flight, division_id: div }), `Added ${name}`)) {
       $('#newName').value = ''; $('#newBib').value = ''; $('#newBib').focus();
     }
+  }
+  if (kind === 'split') {
+    const per = parseInt($('#perFlight').value, 10);
+    if (!(per > 0)) { toast('Enter how many athletes go in each flight'); return; }
+    const btn = f.querySelector('button');
+    if (!arm(btn, 'Tap again to split')) return;
+    const d = viewDiv();
+    const list = S.athletes.filter(a => a.division_id === d.id).sort(byBib);
+    const rows = list.map((a, i) => ({ id: a.id, name: a.name, bib: a.bib, division_id: a.division_id, flight: String(Math.floor(i / per) + 1) }));
+    await write(() => sb.from('athletes').upsert(rows), `Split into ${Math.ceil(list.length / per)} flights`);
   }
   if (kind === 'add-div') {
     const name = $('#newDivName').value.trim(), course = $('#newDivCourse').value.trim() || 'Course';
@@ -482,6 +488,7 @@ document.addEventListener('change', e => {
   if (k === 'div-course') write(() => sb.from('divisions').update({ course_name: v || 'Course' }).eq('id', id));
   if (k === 'athlete-name' && v) write(() => sb.from('athletes').update({ name: v }).eq('id', id));
   if (k === 'athlete-bib') write(() => sb.from('athletes').update({ bib: v }).eq('id', id));
+  if (k === 'athlete-flight') write(() => sb.from('athletes').update({ flight: cleanFlight(v) }).eq('id', id));
   if (k === 'athlete-div') {
     const a = S.athletes.find(x => x.id === id);
     write(async () => {
