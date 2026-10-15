@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import './style.css';
+import { parseTable, mapColumns } from './importer.js';
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
@@ -15,6 +16,7 @@ const LS = {
 const byOrder = (a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || String(a.name).localeCompare(b.name);
 const bibNum = b => { const n = parseFloat(b); return isNaN(n) ? Infinity : n; };
 const byBib = (a, b) => bibNum(a.bib) - bibNum(b.bib) || String(a.bib || '').localeCompare(String(b.bib || '')) || String(a.name).localeCompare(b.name);
+const norm = s => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
 
 export function parseTime(s) {
   s = String(s).trim(); if (!s) return null;
@@ -31,17 +33,17 @@ const num = v => (v == null ? null : Number(v));
 
 /* ---------- state ---------- */
 const S = {
-  event: {}, divisions: [], courses: [], athletes: [], runs: [],
+  event: {}, divisions: [], athletes: [], runs: [],
   loaded: false, session: null,
   tab: LS.get('tab', 'board'), viewDiv: LS.get('viewDiv', null),
-  boardCourse: 'all', judgeCourse: LS.get('judgeCourse', null),
   search: '', pendingMain: false, saving: new Set(), runsDiv: undefined,
+  importText: '', importDiv: null, preview: null, importing: false,
 };
 const canWrite = () => !!S.session;
 
 function toast(msg) {
   const t = $('#toast'); t.textContent = msg; t.hidden = false;
-  clearTimeout(toast.h); toast.h = setTimeout(() => (t.hidden = true), 2600);
+  clearTimeout(toast.h); toast.h = setTimeout(() => (t.hidden = true), 3000);
 }
 function setSync(on, text) { const s = $('#sync'); s.classList.toggle('on', on); s.lastElementChild.textContent = text; }
 
@@ -61,28 +63,18 @@ async function write(fn, ok) {
 }
 
 const activeDiv = () => S.divisions.find(d => d.id === S.event.active_division_id) || null;
-const viewDiv = () => S.divisions.find(d => d.id === S.viewDiv) || activeDiv() || S.divisions[0] || null;
-const courses = () => [...S.courses].sort(byOrder);
+const viewDiv = () => S.divisions.find(d => d.id === S.viewDiv) || activeDiv() || [...S.divisions].sort(byOrder)[0] || null;
 const divAthletes = id => S.athletes.filter(a => a.division_id === id).sort(byBib);
+const courseName = d => (d && d.course_name) || 'Course';
 
-/* ---------- standings: most points wins, ties broken by fastest total time ---------- */
-export function standings(divId, courseId) {
-  const list = courseId === 'all' ? courses() : courses().filter(c => c.id === courseId);
-  const cids = new Set(list.map(c => c.id));
-  const by = {};
-  for (const r of S.runs) {
-    if (r.division_id !== divId || !cids.has(r.course_id)) continue;
-    (by[r.athlete_id] ||= {})[r.course_id] = r;
-  }
+/* ---------- standings: most points wins, ties broken by fastest time ---------- */
+export function standings(divId) {
+  const runBy = {};
+  for (const r of S.runs) if (r.division_id === divId) runBy[r.athlete_id] = r;
   const rows = [];
   for (const a of divAthletes(divId)) {
-    const rs = by[a.id]; if (!rs) continue;
-    let pts = 0, time = 0, timed = 0;
-    for (const r of Object.values(rs)) {
-      pts += Number(r.points) || 0;
-      if (r.time_sec != null) { time += Number(r.time_sec); timed++; }
-    }
-    rows.push({ a, rs, pts: Math.round(pts * 100) / 100, time: timed ? Math.round(time * 100) / 100 : null });
+    const r = runBy[a.id]; if (!r) continue;
+    rows.push({ a, r, pts: Math.round((Number(r.points) || 0) * 100) / 100, time: r.time_sec == null ? null : Math.round(Number(r.time_sec) * 100) / 100 });
   }
   rows.sort((x, y) => (y.pts - x.pts) || ((x.time ?? Infinity) - (y.time ?? Infinity)) || String(x.a.name).localeCompare(y.a.name));
   rows.forEach((r, i) => {
@@ -147,20 +139,15 @@ function signInView() {
 
 function boardView() {
   const d = viewDiv();
-  if (!d || !S.courses.length) return `<div class="empty"><strong>Set up the event first</strong><span>Add your divisions and courses in Setup, then enter athletes. Winners appear here as judges record runs.</span><button class="btn" data-act="tab" data-tab="setup">Go to Setup</button></div>`;
-  const cs = courses();
-  if (S.boardCourse !== 'all' && !cs.find(c => c.id === S.boardCourse)) S.boardCourse = 'all';
-  const rows = standings(d.id, S.boardCourse);
+  if (!d) return `<div class="empty"><strong>Set up the event first</strong><span>Add your divisions in Setup, then enter athletes. Winners appear here as judges record runs.</span><button class="btn" data-act="tab" data-tab="setup">Go to Setup</button></div>`;
+  const rows = standings(d.id);
   const total = divAthletes(d.id).length;
   const live = d.id === S.event.active_division_id, final = !live && d.status === 'final';
-  let h = `<div class="head"><div><h2>${esc(d.name)} · ${final ? 'Final results' : 'Live standings'}</h2><div class="sub">${rows.length} of ${total} athletes have recorded runs · most points wins, fastest time breaks ties</div></div></div>`;
-  h += `<div class="seg" role="group" aria-label="Standings view"><button data-act="board-course" data-id="all" aria-pressed="${S.boardCourse === 'all'}">Overall</button>${cs.map(c => `<button data-act="board-course" data-id="${c.id}" aria-pressed="${S.boardCourse === c.id}">${esc(c.name)}</button>`).join('')}</div>`;
+  let h = `<div class="head"><div><h2>${esc(d.name)} · ${final ? 'Final results' : 'Live standings'}</h2><div class="sub">${esc(courseName(d))} · ${rows.length} of ${total} athletes have run · most points wins, fastest time breaks ties</div></div></div>`;
   if (!rows.length) return h + `<div class="empty"><strong>No runs recorded yet</strong><span>When a judge saves points and a time on the Judge tab, this board fills in on every device.</span></div>`;
-  const showCourses = S.boardCourse === 'all' && cs.length > 1;
-  h += `<div class="scroll"><table><thead><tr><th>Place</th><th>Athlete</th>${showCourses ? cs.map(c => `<th class="num hide-sm">${esc(c.name)}</th>`).join('') : ''}<th class="num">Points</th><th class="num">Time</th></tr></thead><tbody>`;
+  h += `<div class="scroll"><table><thead><tr><th>Place</th><th>Athlete</th><th class="num">Points</th><th class="num">Time</th></tr></thead><tbody>`;
   for (const r of rows.slice(0, 20)) {
     h += `<tr class="r${r.rank}"><td class="rank"><span>${r.rank}</span></td><td><span class="bib">${r.a.bib ? '#' + esc(r.a.bib) : ''}</span><span class="name">${esc(r.a.name)}</span>${r.timeBreak ? '<span class="tie">Tie · time</span>' : ''}</td>`;
-    if (showCourses) h += cs.map(c => { const x = r.rs[c.id]; return `<td class="num cell hide-sm">${x ? `<b>${fmtPts(Number(x.points) || 0)}</b> <small>${fmtTime(num(x.time_sec))}</small>` : '<small>—</small>'}</td>`; }).join('');
     h += `<td class="num total">${fmtPts(r.pts)}</td><td class="num time">${fmtTime(r.time)}</td></tr>`;
   }
   h += '</tbody></table></div>';
@@ -169,23 +156,20 @@ function boardView() {
 }
 
 function judgeView() {
-  const d = viewDiv(), cs = courses();
-  if (!d || !cs.length) return `<div class="empty"><strong>Nothing to judge yet</strong><span>Add a division and at least one course in Setup.</span><button class="btn" data-act="tab" data-tab="setup">Go to Setup</button></div>`;
-  if (!cs.find(c => c.id === S.judgeCourse)) S.judgeCourse = cs[0].id;
-  const c = cs.find(x => x.id === S.judgeCourse);
+  const d = viewDiv();
+  if (!d) return `<div class="empty"><strong>Nothing to judge yet</strong><span>Add a division in Setup.</span><button class="btn" data-act="tab" data-tab="setup">Go to Setup</button></div>`;
   const as = divAthletes(d.id);
   const dis = canWrite() ? '' : 'disabled';
-  let h = `<div class="head"><div><h2>Judge · ${esc(c.name)}</h2><div class="sub">${esc(d.name)} · type points and time, then tap Return or the next box to save</div></div></div>`;
-  h += `<div class="seg" role="group" aria-label="Course">${cs.map(x => `<button data-act="judge-course" data-id="${x.id}" aria-pressed="${x.id === c.id}">${esc(x.name)}</button>`).join('')}</div>`;
-  if (!as.length) return h + `<div class="empty"><strong>No athletes in ${esc(d.name)}</strong><span>Add athletes on the Athletes tab.</span><button class="btn" data-act="tab" data-tab="athletes">Add athletes</button></div>`;
+  let h = `<div class="head"><div><h2>Judge · ${esc(courseName(d))}</h2><div class="sub">${esc(d.name)} · type points and time, then tap Return or the next box to save</div></div></div>`;
+  if (!as.length) return h + `<div class="empty"><strong>No athletes in ${esc(d.name)}</strong><span>Add or import athletes on the Athletes tab.</span><button class="btn" data-act="tab" data-tab="athletes">Add athletes</button></div>`;
   h += `<div class="row" style="margin-bottom:12px"><input id="search" placeholder="Find athlete by name or bib" value="${esc(S.search)}" autocomplete="off" style="max-width:360px"></div>`;
   h += `<div class="scroll"><table class="sheet"><thead><tr><th>Athlete</th><th class="pcol">Points</th><th class="tcol">Time</th><th class="state"><span class="hide-sm">Saved</span></th></tr></thead><tbody>`;
   for (const a of as) {
-    const r = S.runs.find(x => x.athlete_id === a.id && x.course_id === c.id);
-    const busy = S.saving.has(a.id + '_' + c.id);
+    const r = S.runs.find(x => x.athlete_id === a.id);
+    const busy = S.saving.has(a.id);
     h += `<tr data-aid="${a.id}" data-q="${esc((a.name + ' ' + (a.bib || '')).toLowerCase())}"><td><span class="bib">${a.bib ? '#' + esc(a.bib) : ''}</span><span class="name">${esc(a.name)}</span></td>
-    <td><input id="p_${a.id}_${c.id}" class="pts" inputmode="decimal" autocomplete="off" aria-label="Points for ${esc(a.name)}" value="${r ? esc(fmtPts(Number(r.points) || 0)) : ''}" ${dis}></td>
-    <td><input id="t_${a.id}_${c.id}" class="tm" inputmode="decimal" autocomplete="off" placeholder="0:00.00" aria-label="Time for ${esc(a.name)}" value="${r && r.time_sec != null ? fmtTime(num(r.time_sec)) : ''}" ${dis}></td>
+    <td><input id="p_${a.id}" class="pts" inputmode="decimal" autocomplete="off" aria-label="Points for ${esc(a.name)}" value="${r ? esc(fmtPts(Number(r.points) || 0)) : ''}" ${dis}></td>
+    <td><input id="t_${a.id}" class="tm" inputmode="decimal" autocomplete="off" placeholder="0:00.00" aria-label="Time for ${esc(a.name)}" value="${r && r.time_sec != null ? fmtTime(num(r.time_sec)) : ''}" ${dis}></td>
     <td class="state"><span class="dot ${busy ? 'busy' : r ? 'ok' : ''}" title="${r ? 'Saved' : 'Not recorded'}"></span></td></tr>`;
   }
   h += '</tbody></table></div><p class="note">Time can be entered as 1:23.45 or 83.45 seconds. Clear both boxes to remove a run.</p>';
@@ -196,47 +180,129 @@ function applySearch() {
   document.querySelectorAll('.sheet tbody tr').forEach(tr => (tr.hidden = !!q && !tr.dataset.q.includes(q)));
 }
 
+function divOptions(sel) {
+  return [...S.divisions].sort(byOrder).map(x => `<option value="${x.id}" ${x.id === sel ? 'selected' : ''}>${esc(x.name)}</option>`).join('');
+}
+
+function importPanel(d) {
+  const dis = canWrite() ? '' : 'disabled';
+  const p = S.preview;
+  let h = `<div class="panel import"><h3>Import from Excel or Google Sheets</h3>
+    <span class="note">Copy the rows in your spreadsheet (include the header row) and paste them below, or choose a CSV file. Columns it understands: <b>Name</b> (or First + Last), <b>Bib</b>, <b>Division</b>.</span>
+    <textarea id="importText" placeholder="Bib&#9;Name&#9;Division&#10;12&#9;Maya Ortiz&#9;Division A&#10;13&#9;Jordan Lee&#9;Division B">${esc(S.importText)}</textarea>
+    <div class="row">
+      <label class="btn ghost file-btn">Choose CSV file<input id="importFile" type="file" accept=".csv,.tsv,.txt,text/csv" hidden ${dis}></label>
+      <label class="f" style="flex:1 1 200px">Athletes with no division go into<select id="importDiv">${divOptions(S.importDiv || d.id)}</select></label>
+      <button class="btn" data-act="import-preview" ${dis}>Preview</button>
+    </div>`;
+  if (p) {
+    if (p.error) h += `<div class="banner">${esc(p.error)}</div>`;
+    else {
+      const ready = p.items.filter(i => !i.dup && !i.bad), dups = p.items.filter(i => i.dup), bad = p.items.filter(i => i.bad);
+      const newDivs = [...new Set(ready.filter(i => i.newDiv).map(i => i.divName))];
+      h += `<div class="summary"><b>${ready.length} athletes ready to import.</b>`;
+      if (dups.length) h += ` ${dups.length} already entered will be skipped.`;
+      if (bad.length) h += ` ${bad.length} rows have no name and will be skipped.`;
+      if (newDivs.length) h += ` New ${newDivs.length === 1 ? 'division' : 'divisions'} will be created: ${newDivs.map(esc).join(', ')}.`;
+      h += `<div class="muted" style="font-size:.85rem">Columns found: ${esc(p.found)}</div></div>`;
+      h += `<div class="scroll preview"><table><thead><tr><th>Bib</th><th>Name</th><th>Division</th><th></th></tr></thead><tbody>${p.items.slice(0, 300).map(i => `<tr class="${i.dup || i.bad ? 'skip' : ''}"><td class="bib">${esc(i.bib)}</td><td>${esc(i.name) || '<span class="muted">(blank)</span>'}</td><td>${esc(i.divName)}</td><td>${i.bad ? '<span class="tag">Skip</span>' : i.dup ? '<span class="tag">Already entered</span>' : i.newDiv ? '<span class="tag new">New division</span>' : ''}</td></tr>`).join('')}</tbody></table></div>`;
+      if (p.items.length > 300) h += `<span class="note">Showing the first 300 of ${p.items.length} rows.</span>`;
+      h += `<div class="row"><button class="btn" data-act="import-run" ${ready.length && !S.importing ? '' : 'disabled'}>${S.importing ? 'Importing…' : `Import ${ready.length} athletes`}</button><button class="btn ghost" data-act="import-cancel">Cancel</button></div>`;
+    }
+  }
+  return h + '</div>';
+}
+
 function athletesView() {
   const d = viewDiv();
   if (!d) return `<div class="empty"><strong>Add a division first</strong><span>Athletes are entered into a division.</span><button class="btn" data-act="tab" data-tab="setup">Go to Setup</button></div>`;
-  const as = divAthletes(d.id), divs = [...S.divisions].sort(byOrder);
-  const opts = sel => divs.map(x => `<option value="${x.id}" ${x.id === sel ? 'selected' : ''}>${esc(x.name)}</option>`).join('');
+  const as = divAthletes(d.id);
   const dis = canWrite() ? '' : 'disabled';
-  let h = `<div class="head"><div><h2>Athletes · ${esc(d.name)}</h2><div class="sub">${as.length} entered. Switch divisions with the bar above.</div></div></div><div class="grid2">`;
-  h += `<form class="panel" data-form="add-athlete"><h3>Add athlete</h3>
+  let h = `<div class="head"><div><h2>Athletes · ${esc(d.name)}</h2><div class="sub">${as.length} entered in this division · ${S.athletes.length} total. Switch divisions with the bar above.</div></div></div><div class="grid2">`;
+  h += importPanel(d);
+  h += `<form class="panel" data-form="add-athlete"><h3>Add one athlete</h3>
     <div class="row"><label class="f" style="flex:0 0 90px">Bib<input id="newBib" autocomplete="off"></label><label class="f" style="flex:1 1 180px">Name<input id="newName" autocomplete="off" required></label></div>
-    <label class="f">Division<select id="newDiv">${opts(d.id)}</select></label>
-    <div><button class="btn" ${dis}>Add athlete</button></div></form>`;
-  h += `<form class="panel" data-form="bulk"><h3>Paste a list</h3><span class="note">One athlete per line, as <b>bib, name</b> or just a name. They go into ${esc(d.name)}.</span>
-    <textarea id="bulk" placeholder="12, Maya Ortiz&#10;13, Jordan Lee"></textarea><div><button class="btn ghost" ${dis}>Add all</button></div></form></div>`;
-  if (!as.length) return h + `<div class="empty" style="margin-top:16px"><strong>No athletes in ${esc(d.name)} yet</strong><span>Use the forms above to enter them.</span></div>`;
-  h += `<div class="list" style="margin-top:16px">${as.map(a => `<div class="item"><input id="ab_${a.id}" data-edit="athlete-bib" data-id="${a.id}" value="${esc(a.bib || '')}" placeholder="Bib" style="flex:0 0 80px" aria-label="Bib" ${dis}><input id="an_${a.id}" data-edit="athlete-name" data-id="${a.id}" value="${esc(a.name)}" aria-label="Name" ${dis}><select id="ad_${a.id}" data-edit="athlete-div" data-id="${a.id}" style="flex:0 1 170px" aria-label="Division" ${dis}>${opts(a.division_id)}</select><button class="btn danger" data-act="del-athlete" data-id="${a.id}" ${dis}>Remove</button></div>`).join('')}</div>`;
+    <label class="f">Division<select id="newDiv">${divOptions(d.id)}</select></label>
+    <div><button class="btn" ${dis}>Add athlete</button></div></form></div>`;
+  if (!as.length) return h + `<div class="empty" style="margin-top:16px"><strong>No athletes in ${esc(d.name)} yet</strong><span>Import a list or add them one at a time above.</span></div>`;
+  h += `<div class="list" style="margin-top:16px">${as.map(a => `<div class="item"><input id="ab_${a.id}" data-edit="athlete-bib" data-id="${a.id}" value="${esc(a.bib || '')}" placeholder="Bib" style="flex:0 0 80px" aria-label="Bib" ${dis}><input id="an_${a.id}" data-edit="athlete-name" data-id="${a.id}" value="${esc(a.name)}" aria-label="Name" ${dis}><select id="ad_${a.id}" data-edit="athlete-div" data-id="${a.id}" style="flex:0 1 170px" aria-label="Division" ${dis}>${divOptions(a.division_id)}</select><button class="btn danger" data-act="del-athlete" data-id="${a.id}" ${dis}>Remove</button></div>`).join('')}</div>`;
   return h;
 }
 
 function setupView() {
-  const cs = courses(), divs = [...S.divisions].sort(byOrder);
+  const divs = [...S.divisions].sort(byOrder);
   const dis = canWrite() ? '' : 'disabled';
   let h = `<div class="head"><div><h2>Event setup</h2><div class="sub">Changes here show up on every device right away.</div></div></div><div class="grid2">`;
   h += `<div class="panel"><h3>Event</h3><label class="f">Event name<input id="evName" data-edit="event-name" value="${esc(S.event.name || '')}" placeholder="Fall Ninja Classic" ${dis}></label></div>`;
-  h += `<div class="panel"><h3>Courses</h3><span class="note">Every division runs these same courses. Rename any time.</span><div class="list">${cs.map((c, i) => `<div class="item"><input id="cn_${c.id}" data-edit="course-name" data-id="${c.id}" value="${esc(c.name)}" aria-label="Course name" ${dis}><button class="btn ghost" data-act="move-course" data-id="${c.id}" data-dir="-1" ${i && canWrite() ? '' : 'disabled'} aria-label="Move up">↑</button><button class="btn ghost" data-act="move-course" data-id="${c.id}" data-dir="1" ${i < cs.length - 1 && canWrite() ? '' : 'disabled'} aria-label="Move down">↓</button><button class="btn danger" data-act="del-course" data-id="${c.id}" ${dis}>Delete</button></div>`).join('') || '<span class="muted">No courses yet.</span>'}</div>
-    <form class="row" data-form="add-course"><input id="newCourse" placeholder="New course name" style="flex:1 1 180px" ${dis}><button class="btn" ${dis}>Add course</button></form></div>`;
-  h += `<div class="panel"><h3>Divisions</h3><span class="note">Set the division that is running now as Live. When it's done, mark it Final to lock its awards view, then make the next one Live.</span><div class="list">${divs.map(d => {
+  h += `<div class="panel span2"><h3>Divisions and courses</h3><span class="note">Each division runs one course. Set the division that's running now to Live. When it's done, mark it Final to lock its awards view, then make the next one Live.</span><div class="list">${divs.map(d => {
     const live = d.id === S.event.active_division_id, n = S.athletes.filter(a => a.division_id === d.id).length;
-    return `<div class="item"><input id="dn_${d.id}" data-edit="div-name" data-id="${d.id}" value="${esc(d.name)}" aria-label="Division name" ${dis}><span class="muted" style="font-size:.85rem">${n} athletes</span>
-    ${live ? `<button class="btn" data-act="div-final" data-id="${d.id}" ${dis}>Mark final</button>` : `<button class="btn ghost" data-act="div-live" data-id="${d.id}" ${dis}>Make live</button>`}
-    ${!live && d.status === 'final' ? `<button class="btn ghost" data-act="div-reopen" data-id="${d.id}" ${dis}>Reopen</button>` : ''}
-    <button class="btn danger" data-act="del-div" data-id="${d.id}" ${n || !canWrite() ? 'disabled' : ''} ${n ? 'title="Move or remove its athletes first"' : ''}>Delete</button></div>`;
+    return `<div class="item div-item">
+      <label class="f" style="flex:1 1 160px">Division<input id="dn_${d.id}" data-edit="div-name" data-id="${d.id}" value="${esc(d.name)}" ${dis}></label>
+      <label class="f" style="flex:1 1 160px">Course<input id="dc_${d.id}" data-edit="div-course" data-id="${d.id}" value="${esc(d.course_name || '')}" placeholder="Course name" ${dis}></label>
+      <span class="muted" style="font-size:.85rem">${n} athletes</span>
+      ${live ? `<button class="btn" data-act="div-final" data-id="${d.id}" ${dis}>Mark final</button>` : `<button class="btn ghost" data-act="div-live" data-id="${d.id}" ${dis}>Make live</button>`}
+      ${!live && d.status === 'final' ? `<button class="btn ghost" data-act="div-reopen" data-id="${d.id}" ${dis}>Reopen</button>` : ''}
+      <button class="btn danger" data-act="del-div" data-id="${d.id}" ${n || !canWrite() ? 'disabled' : ''} ${n ? 'title="Move or remove its athletes first"' : ''}>Delete</button></div>`;
   }).join('') || '<span class="muted">No divisions yet.</span>'}</div>
-    <form class="row" data-form="add-div"><input id="newDivName" placeholder="Division C" style="flex:1 1 180px" ${dis}><button class="btn" ${dis}>Add division</button></form></div>`;
-  h += `<div class="panel"><h3>Using it on iPads and phones</h3><p class="note" style="margin:0">Open the site on every device. Judges sign in, pick their course on the Judge tab, and save. The Winners tab updates live on all screens, signed in or not. On iPad, Share → Add to Home Screen makes it open full screen.</p></div></div>`;
+    <form class="row" data-form="add-div"><input id="newDivName" placeholder="Division name" style="flex:1 1 160px" ${dis}><input id="newDivCourse" placeholder="Course name" style="flex:1 1 160px" ${dis}><button class="btn" ${dis}>Add division</button></form></div>`;
+  h += `<div class="panel"><h3>Using it on iPads and phones</h3><p class="note" style="margin:0">Open the site on every device. Judges sign in and score on the Judge tab. The Winners tab updates live on all screens, signed in or not. On iPad, Share → Add to Home Screen makes it open full screen.</p></div></div>`;
   return h;
+}
+
+/* ---------- import ---------- */
+function matchDivision(name) {
+  const n = norm(name); if (!n) return null;
+  return S.divisions.find(d => norm(d.name) === n || norm(d.name) === 'division ' + n || 'division ' + norm(d.name) === n) || null;
+}
+function buildPreview() {
+  S.importText = $('#importText')?.value ?? S.importText;
+  S.importDiv = $('#importDiv')?.value || S.importDiv;
+  const rows = parseTable(S.importText);
+  if (!rows.length) { S.preview = { error: 'Paste some rows or choose a CSV file first.' }; return; }
+  const map = mapColumns(rows);
+  if (map.error) { S.preview = { error: map.error }; return; }
+  const def = S.divisions.find(d => d.id === S.importDiv) || viewDiv();
+  const existing = new Set(S.athletes.map(a => a.division_id + '|' + norm(a.name)));
+  const seen = new Set();
+  const items = map.records.map(rec => {
+    const m = rec.division ? matchDivision(rec.division) : def;
+    const divName = m ? m.name : rec.division.trim();
+    const key = (m ? m.id : 'new:' + norm(divName)) + '|' + norm(rec.name);
+    const dup = !!rec.name && (existing.has(key) || seen.has(key));
+    seen.add(key);
+    return { name: rec.name, bib: rec.bib, divName, divId: m ? m.id : null, newDiv: !m, dup, bad: !rec.name };
+  });
+  S.preview = { items, found: map.found };
+}
+async function runImport() {
+  const ready = S.preview?.items.filter(i => !i.dup && !i.bad) || [];
+  if (!ready.length) return;
+  S.importing = true; renderMain();
+  const ok = await write(async () => {
+    const newNames = [...new Set(ready.filter(i => i.newDiv).map(i => i.divName))];
+    const ids = {};
+    if (newNames.length) {
+      let order = S.divisions.reduce((m, x) => Math.max(m, x.sort_order ?? 0), 0);
+      const r = await sb.from('divisions').insert(newNames.map(name => ({ name, sort_order: ++order, course_name: 'Course' }))).select();
+      if (r.error) return r;
+      for (const d of r.data) ids[norm(d.name)] = d.id;
+    }
+    const rows = ready.map(i => ({ name: i.name, bib: i.bib, division_id: i.divId || ids[norm(i.divName)] }));
+    for (let k = 0; k < rows.length; k += 500) {
+      const r = await sb.from('athletes').insert(rows.slice(k, k + 500));
+      if (r.error) return r;
+    }
+    return null;
+  }, `Imported ${ready.length} athletes`);
+  S.importing = false;
+  if (ok) { S.preview = null; S.importText = ''; }
+  renderMain();
 }
 
 /* ---------- data loading + realtime ---------- */
 async function loadTable(name) {
   if (name === 'runs') return loadRuns();
-  const { data, error } = await sb.from(name).select('*');
+  const { data, error } = await sb.from(name).select('*').range(0, 9999);
   if (error) { setSync(false, 'Offline'); toast('Could not load ' + name + ': ' + error.message); return; }
   if (name === 'event') S.event = data[0] || {};
   else S[name] = data;
@@ -255,9 +321,11 @@ function syncRunsDivision() {
 }
 const reloadTimers = {};
 function scheduleReload(table) {
+  if (!['event', 'divisions', 'athletes', 'runs'].includes(table)) return;
   clearTimeout(reloadTimers[table]);
   reloadTimers[table] = setTimeout(async () => { await loadTable(table); render(); }, 150);
 }
+const ALL = ['event', 'divisions', 'athletes', 'runs'];
 
 async function start() {
   render();
@@ -266,7 +334,7 @@ async function start() {
   S.session = session;
   sb.auth.onAuthStateChange((_e, s) => { S.session = s; render(); });
 
-  await Promise.all(['event', 'divisions', 'courses', 'athletes'].map(loadTable));
+  await Promise.all(['event', 'divisions', 'athletes'].map(loadTable));
   await loadRuns();
   S.loaded = true;
   render();
@@ -274,15 +342,11 @@ async function start() {
   sb.channel('scoreboard')
     .on('postgres_changes', { event: '*', schema: 'public' }, p => scheduleReload(p.table))
     .subscribe(status => {
-      if (status === 'SUBSCRIBED') {
-        setSync(true, 'Live');
-        // catch anything missed while disconnected
-        ['event', 'divisions', 'courses', 'athletes', 'runs'].forEach(scheduleReload);
-      } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') setSync(false, 'Reconnecting');
+      if (status === 'SUBSCRIBED') { setSync(true, 'Live'); ALL.forEach(scheduleReload); }
+      else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') setSync(false, 'Reconnecting');
     });
-  // iPads sleep: refresh everything when the screen wakes up
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') ['event', 'divisions', 'courses', 'athletes', 'runs'].forEach(scheduleReload);
+    if (document.visibilityState === 'visible') ALL.forEach(scheduleReload);
   });
 }
 
@@ -290,40 +354,39 @@ async function start() {
 function setTab(t) { S.tab = t; if (t !== 'signin') LS.set('tab', t); S.search = ''; render(); }
 const nextOrder = list => list.reduce((m, x) => Math.max(m, x.sort_order ?? 0), 0) + 1;
 
-async function saveRun(aid, cid) {
-  const pIn = document.getElementById(`p_${aid}_${cid}`), tIn = document.getElementById(`t_${aid}_${cid}`);
+async function saveRun(aid) {
+  const pIn = document.getElementById(`p_${aid}`), tIn = document.getElementById(`t_${aid}`);
   if (!pIn || !tIn) return;
   const pv = pIn.value.trim(), tv = tIn.value.trim();
   let points = null, time = null;
   if (pv !== '') { points = Number(pv); if (!isFinite(points) || points < 0) { pIn.classList.add('bad'); toast('Points must be a number, like 7 or 7.5'); return; } }
   if (tv !== '') { time = parseTime(tv); if (!isFinite(time) || time < 0) { tIn.classList.add('bad'); toast('Enter time as 1:23.45 or 83.45'); return; } }
   pIn.classList.remove('bad'); tIn.classList.remove('bad');
-  const key = `${aid}_${cid}`;
-  const cur = S.runs.find(r => r.athlete_id === aid && r.course_id === cid);
+  const cur = S.runs.find(r => r.athlete_id === aid);
   const a = S.athletes.find(x => x.id === aid); if (!a) return;
   const dot = pIn.closest('tr')?.querySelector('.dot');
 
   if (points == null && time == null) {
     if (!cur) return;
-    S.saving.add(key);
-    const ok = await write(() => sb.from('runs').delete().eq('athlete_id', aid).eq('course_id', cid));
-    S.saving.delete(key);
+    S.saving.add(aid);
+    const ok = await write(() => sb.from('runs').delete().eq('athlete_id', aid));
+    S.saving.delete(aid);
     if (ok) { S.runs = S.runs.filter(r => r !== cur); if (dot) dot.className = 'dot'; }
     return;
   }
-  const body = { athlete_id: aid, course_id: cid, division_id: a.division_id, points: points ?? 0, time_sec: time, updated_at: new Date().toISOString() };
+  const body = { athlete_id: aid, division_id: a.division_id, points: points ?? 0, time_sec: time, updated_at: new Date().toISOString() };
   if (cur && Number(cur.points) === body.points && num(cur.time_sec) === body.time_sec && cur.division_id === body.division_id) return;
 
-  S.saving.add(key); if (dot) dot.className = 'dot busy';
+  S.saving.add(aid); if (dot) dot.className = 'dot busy';
   let saved = null;
   const ok = await write(async () => {
-    const res = await sb.from('runs').upsert(body, { onConflict: 'athlete_id,course_id' }).select().single();
+    const res = await sb.from('runs').upsert(body, { onConflict: 'athlete_id' }).select().single();
     saved = res.data; return res;
   });
-  S.saving.delete(key);
+  S.saving.delete(aid);
   if (dot) dot.className = 'dot ' + (ok ? 'ok' : '');
   if (ok && saved) {
-    S.runs = [...S.runs.filter(r => !(r.athlete_id === aid && r.course_id === cid)), saved];
+    S.runs = [...S.runs.filter(r => r.athlete_id !== aid), saved];
     toast(`Saved ${a.name}: ${fmtPts(body.points)} pts${time != null ? ' · ' + fmtTime(time) : ''}`);
   }
 }
@@ -345,23 +408,11 @@ document.addEventListener('click', async e => {
   const id = b.dataset.id;
   switch (b.dataset.act) {
     case 'tab': setTab(b.dataset.tab); break;
-    case 'view-div': S.viewDiv = id === S.event.active_division_id ? null : id; LS.set('viewDiv', S.viewDiv); S.boardCourse = 'all'; render(); break;
+    case 'view-div': S.viewDiv = id === S.event.active_division_id ? null : id; LS.set('viewDiv', S.viewDiv); render(); break;
     case 'follow-live': S.viewDiv = null; LS.set('viewDiv', null); render(); break;
-    case 'board-course': S.boardCourse = id; renderMain(); break;
-    case 'judge-course': S.judgeCourse = id; LS.set('judgeCourse', id); renderMain(); break;
-    case 'move-course': {
-      const cs = courses(), i = cs.findIndex(c => c.id === id), j = i + Number(b.dataset.dir);
-      if (j < 0 || j >= cs.length) break;
-      const A = cs[i], B = cs[j];
-      let oa = A.sort_order ?? i, ob = B.sort_order ?? j; if (oa === ob) { oa = i; ob = j; }
-      await write(() => Promise.all([
-        sb.from('courses').update({ sort_order: ob }).eq('id', A.id),
-        sb.from('courses').update({ sort_order: oa }).eq('id', B.id),
-      ]));
-      break;
-    }
-    case 'del-course': if (!arm(b, 'Tap again to delete')) break;
-      await write(() => sb.from('courses').delete().eq('id', id), 'Course deleted'); break;
+    case 'import-preview': buildPreview(); renderMain(); break;
+    case 'import-cancel': S.preview = null; renderMain(); break;
+    case 'import-run': runImport(); break;
     case 'div-live': {
       const prev = activeDiv();
       await write(async () => {
@@ -403,32 +454,32 @@ document.addEventListener('submit', async e => {
       $('#newName').value = ''; $('#newBib').value = ''; $('#newBib').focus();
     }
   }
-  if (kind === 'bulk') {
-    const d = viewDiv();
-    const rows = $('#bulk').value.split('\n').map(s => s.trim()).filter(Boolean).map(l => {
-      const m = l.match(/^\s*#?([\w-]+)\s*[,\t]\s*(.+)$/);
-      return { bib: m ? m[1] : '', name: (m ? m[2] : l).trim(), division_id: d.id };
-    });
-    if (!rows.length) return;
-    if (await write(() => sb.from('athletes').insert(rows), `Added ${rows.length} athletes`)) $('#bulk').value = '';
-  }
-  if (kind === 'add-course') {
-    const name = $('#newCourse').value.trim(); if (!name) return;
-    if (await write(() => sb.from('courses').insert({ name, sort_order: nextOrder(S.courses) }), `Added ${name}`)) $('#newCourse').value = '';
-  }
   if (kind === 'add-div') {
-    const name = $('#newDivName').value.trim(); if (!name) return;
-    if (await write(() => sb.from('divisions').insert({ name, sort_order: nextOrder(S.divisions) }), `Added ${name}`)) $('#newDivName').value = '';
+    const name = $('#newDivName').value.trim(), course = $('#newDivCourse').value.trim() || 'Course';
+    if (!name) return;
+    if (await write(() => sb.from('divisions').insert({ name, course_name: course, sort_order: nextOrder(S.divisions) }), `Added ${name}`)) {
+      $('#newDivName').value = ''; $('#newDivCourse').value = '';
+    }
   }
 });
 
 document.addEventListener('change', e => {
   const t = e.target;
-  if (t.matches('.sheet input')) { saveRun(t.closest('tr').dataset.aid, S.judgeCourse); return; }
+  if (t.matches('.sheet input')) { saveRun(t.closest('tr').dataset.aid); return; }
+  if (t.id === 'importFile') {
+    const file = t.files && t.files[0]; if (!file) return;
+    if (/\.(xlsx|xls|numbers)$/i.test(file.name)) { toast('Save the spreadsheet as CSV first (File → Save As → CSV), or copy and paste the rows.'); t.value = ''; return; }
+    const reader = new FileReader();
+    reader.onload = () => { S.importText = String(reader.result || ''); const ta = $('#importText'); if (ta) ta.value = S.importText; buildPreview(); renderMain(); };
+    reader.onerror = () => toast('Could not read that file.');
+    reader.readAsText(file);
+    return;
+  }
+  if (t.id === 'importDiv') { S.importDiv = t.value; if (S.preview) { buildPreview(); renderMain(); } return; }
   const k = t.dataset.edit, id = t.dataset.id, v = t.value.trim(); if (!k) return;
   if (k === 'event-name') write(() => sb.from('event').upsert({ id: 1, name: v || 'Ninja Tournament', active_division_id: S.event.active_division_id ?? null }));
-  if (k === 'course-name' && v) write(() => sb.from('courses').update({ name: v }).eq('id', id));
   if (k === 'div-name' && v) write(() => sb.from('divisions').update({ name: v }).eq('id', id));
+  if (k === 'div-course') write(() => sb.from('divisions').update({ course_name: v || 'Course' }).eq('id', id));
   if (k === 'athlete-name' && v) write(() => sb.from('athletes').update({ name: v }).eq('id', id));
   if (k === 'athlete-bib') write(() => sb.from('athletes').update({ bib: v }).eq('id', id));
   if (k === 'athlete-div') {
@@ -448,6 +499,7 @@ document.addEventListener('keydown', e => {
 });
 document.addEventListener('input', e => {
   if (e.target.id === 'search') { S.search = e.target.value; applySearch(); }
+  if (e.target.id === 'importText') { S.importText = e.target.value; }
   if (e.target.classList.contains('bad')) e.target.classList.remove('bad');
 });
 $('#main').addEventListener('focusout', () => setTimeout(() => { if (S.pendingMain && !isEditing()) renderMain(); }, 80));
