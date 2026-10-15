@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Ninja Scores">
+  <title>Ninja Tournament Scoreboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;800;900&family=Barlow:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap">
+</head>
+<body>
+  <header class="bar">
+    <div class="wrap">
+      <div class="event" id="eventName">Ninja Tournament</div>
+      <span class="sync" id="sync"><i></i><span>Connecting</span></span>
+      <button class="btn ghost auth-btn" id="authBtn" hidden></button>
+    </div>
+    <nav class="wrap tabs" role="tablist" id="tabs">
+      <button class="tab" role="tab" data-tab="board">Winners</button>
+      <button class="tab" role="tab" data-tab="judge">Judge</button>
+      <button class="tab" role="tab" data-tab="athletes">Athletes</button>
+      <button class="tab" role="tab" data-tab="setup">Setup</button>
+    </nav>
+  </header>
+  <div class="rail"><div class="wrap" id="rail"><span class="lbl">Division</span></div></div>
+  <main class="wrap" id="main">
+    <div class="empty"><strong>Loading the live scoreboard…</strong></div>
+  </main>
+  <div class="toast" id="toast" hidden></div>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
