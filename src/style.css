@@ -121,3 +121,18 @@ input[type=email],input[type=password]{border:1px solid var(--line);background:v
 html,body{margin:0}
 :root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
 [hidden]{display:none!important}
+
+/* import + one-course-per-division */
+.grid2>.import{grid-column:1/-1}
+.span2{grid-column:1/-1}
+.file-btn{display:inline-flex;align-items:center;cursor:pointer;align-self:flex-end}
+.import .row{align-items:flex-end}
+.summary{display:grid;gap:4px;padding:12px 14px;border-radius:8px;background:var(--sunk);border:1px solid var(--line)}
+.preview{max-height:360px;overflow:auto}
+.preview td{padding:6px 12px}
+tr.skip td{color:var(--muted);text-decoration:line-through}
+tr.skip td:last-child{text-decoration:none}
+.tag{font-size:.68rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase;padding:2px 7px;border-radius:4px;border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+.tag.new{border-color:var(--accent);color:var(--accent)}
+.div-item{align-items:flex-end}
+.div-item label.f input{width:100%}
