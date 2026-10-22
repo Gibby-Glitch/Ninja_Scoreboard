@@ -1,10 +1,15 @@
 import { createClient } from '@supabase/supabase-js';
 import './style.css';
 import { parseTable, mapColumns } from './importer.js';
+import QRCode from 'qrcode';
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
 const sb = SUPABASE_URL && SUPABASE_KEY ? createClient(SUPABASE_URL, SUPABASE_KEY) : null;
+
+// Parent / spectator mode: open the site with ?live (this is what the QR code points to).
+const PARENT = new URLSearchParams(location.search).has('live');
+const parentUrl = () => location.origin + location.pathname + '?live';
 
 /* ---------- helpers ---------- */
 const $ = s => document.querySelector(s);
@@ -37,7 +42,7 @@ const num = v => (v == null ? null : Number(v));
 
 /* ---------- state ---------- */
 const S = {
-  event: {}, divisions: [], athletes: [], runs: [], loaded: false,
+  event: {}, divisions: [], athletes: [], runs: [], loaded: false, session: null, authChecked: false, qr: '',
   tab: LS.get('tab', 'board'), viewDiv: LS.get('viewDiv', null), judgeFlight: LS.get('judgeFlight', 'all'),
   search: '', pendingMain: false, saving: new Set(), runsDiv: undefined,
   importText: '', importDiv: null, preview: null, importing: false,
@@ -51,6 +56,7 @@ function setSync(on, text) { const s = $('#sync'); s.classList.toggle('on', on);
 
 async function write(fn, ok) {
   if (!sb) { toast('Supabase is not configured.'); return false; }
+  if (PARENT || !S.session) { toast('Sign in with the staff login to make changes.'); return false; }
   try {
     const res = await fn();
     const err = Array.isArray(res) ? res.find(r => r && r.error)?.error : res && res.error;
@@ -58,7 +64,9 @@ async function write(fn, ok) {
     if (ok) toast(ok);
     return true;
   } catch (e) {
-    toast('Could not save: ' + (e?.message || 'check the connection and try again'));
+    const msg = String(e?.message || '');
+    if (/row-level security|permission denied|JWT/i.test(msg)) toast('Not saved: this device is not signed in with the staff login.');
+    else toast('Could not save: ' + (msg || 'check the connection and try again'));
     return false;
   }
 }
@@ -94,8 +102,13 @@ function isEditing() {
 }
 function render() {
   $('#eventName').textContent = S.event.name || 'Ninja Tournament';
-  document.title = S.event.name || 'Ninja Tournament Scoreboard';
+  document.title = (S.event.name || 'Ninja Tournament') + (PARENT ? ' · Live results' : '');
   document.querySelectorAll('.tab').forEach(t => t.setAttribute('aria-selected', String(t.dataset.tab === S.tab)));
+  const gated = !PARENT && sb && S.authChecked && !S.session;
+  $('#tabs').hidden = PARENT || gated;
+  $('.rail').hidden = gated;
+  $('#signOut').hidden = PARENT || !S.session;
+  document.body.classList.toggle('parent', PARENT);
   renderRail();
   syncRunsDivision();
   if (isEditing() && S.tab !== 'board') { S.pendingMain = true; return; }
@@ -119,20 +132,33 @@ function renderMain() {
     m.innerHTML = `<div class="banner">Supabase isn't configured. Set <b>VITE_SUPABASE_URL</b> and <b>VITE_SUPABASE_ANON_KEY</b> (see README), then redeploy.</div>`;
     return;
   }
+  if (PARENT) { if (S.loaded) m.innerHTML = boardView(); return; }
+  if (!S.authChecked) return;
+  if (!S.session) { m.innerHTML = signInView(); return; }
   if (!S.loaded) return;
   m.innerHTML = ({ board: boardView, judge: judgeView, athletes: athletesView, setup: setupView }[S.tab] || boardView)();
   if (S.tab === 'judge') applySearch();
 }
 
+function signInView() {
+  return `<form class="panel signin" data-form="signin"><h2>Staff sign in</h2>
+    <span class="note">Judges and the host use the shared staff login. Each device only needs to sign in once.</span>
+    <label class="f">Email<input id="siEmail" type="email" autocomplete="username" required></label>
+    <label class="f">Password<input id="siPass" type="password" autocomplete="current-password" required></label>
+    <div class="row"><button class="btn">Sign in</button><a class="btn ghost" href="?live">View live results instead</a></div></form>`;
+}
+
 function boardView() {
   const d = viewDiv();
-  if (!d) return `<div class="empty"><strong>Set up the event first</strong><span>Add your divisions in Setup, then enter athletes. Winners appear here as judges record runs.</span><button class="btn" data-act="tab" data-tab="setup">Go to Setup</button></div>`;
+  if (!d) return PARENT ? `<div class="empty"><strong>Results will appear here</strong><span>This page updates on its own once the competition starts.</span></div>`
+    : `<div class="empty"><strong>Set up the event first</strong><span>Add your divisions in Setup, then enter athletes. Winners appear here as judges record runs.</span><button class="btn" data-act="tab" data-tab="setup">Go to Setup</button></div>`;
   const rows = standings(d.id);
   const total = divAthletes(d.id).length;
   const hasFlights = divFlights(d.id).some(Boolean);
   const live = d.id === S.event.active_division_id, final = !live && d.status === 'final';
   let h = `<div class="head"><div><h2>${esc(d.name)} · ${final ? 'Final results' : 'Overall standings'}</h2><div class="sub">${esc(courseName(d))} · ${rows.length} of ${total} athletes have run${hasFlights ? ', all flights combined' : ''} · most points wins, fastest time breaks ties</div></div></div>`;
-  if (!rows.length) return h + `<div class="empty"><strong>No runs recorded yet</strong><span>When a judge saves points and a time on the Judge tab, this board fills in on every device.</span></div>`;
+  if (PARENT) h = h.replace('<div class="head">', `<div class="head">${live ? '<span class="pill live big">Live now</span>' : ''}`);
+  if (!rows.length) return h + `<div class="empty"><strong>No runs recorded yet</strong><span>${PARENT ? 'Scores appear here as soon as the judges record them. No need to refresh.' : 'When a judge saves points and a time on the Judge tab, this board fills in on every device.'}</span></div>`;
   h += `<div class="scroll"><table><thead><tr><th>Place</th><th>Athlete</th>${hasFlights ? '<th class="hide-sm">Flight</th>' : ''}<th class="num">Points</th><th class="num">Time</th></tr></thead><tbody>`;
   for (const r of rows.slice(0, 20)) {
     h += `<tr class="r${r.rank}"><td class="rank"><span>${r.rank}</span></td><td><span class="bib">${r.a.bib ? '#' + esc(r.a.bib) : ''}</span><span class="name">${esc(r.a.name)}</span>${r.timeBreak ? '<span class="tie">Tie · time</span>' : ''}</td>`;
@@ -141,6 +167,7 @@ function boardView() {
   }
   h += '</tbody></table></div>';
   if (rows.length > 20) h += `<p class="note">Showing the top 20 of ${rows.length}.</p>`;
+  if (PARENT) h += `<p class="note">Updates automatically. Tap a division above to see its results.</p>`;
   return h;
 }
 
@@ -253,6 +280,11 @@ function setupView() {
       <button class="btn danger" data-act="del-div" data-id="${d.id}" ${n ? 'disabled title="Move or remove its athletes first"' : ''}>Delete</button></div>`;
   }).join('') || '<span class="muted">No divisions yet.</span>'}</div>
     <form class="row" data-form="add-div"><input id="newDivName" placeholder="Division name" style="flex:1 1 160px"><input id="newDivCourse" placeholder="Course name" style="flex:1 1 160px"><button class="btn">Add division</button></form></div>`;
+  h += `<div class="panel qr-panel"><h3>Live results for parents</h3>
+    <span class="note">Parents scan this code to watch the top 20 for each division update live. Their page has no edit buttons, and the database refuses changes from anyone not signed in with the staff login.</span>
+    <div class="qr-row">${S.qr ? `<img class="qr" src="${S.qr}" alt="QR code for live results" width="180" height="180">` : '<div class="qr qr-wait">Making code…</div>'}
+    <div class="qr-side"><code class="link" id="parentLink">${esc(parentUrl())}</code>
+    <div class="row"><button class="btn ghost" data-act="copy-link">Copy link</button><button class="btn" data-act="show-qr">Show big QR code</button></div></div></div></div>`;
   h += `<div class="panel"><h3>Using it on iPads and phones</h3><p class="note" style="margin:0">Open the site on every device. Judges score on the Judge tab and can pick their flight. The Winners tab shows the overall top 20 for the division and updates live on all screens. On iPad, Share → Add to Home Screen makes it open full screen.</p></div></div>`;
   return h;
 }
@@ -338,6 +370,12 @@ function scheduleReload(table) {
 async function start() {
   render();
   if (!sb) { setSync(false, 'Not set up'); renderMain(); return; }
+  if (!PARENT) {
+    const { data: { session } } = await sb.auth.getSession();
+    S.session = session; S.authChecked = true;
+    sb.auth.onAuthStateChange((_e, s2) => { const was = !!S.session; S.session = s2; if (was !== !!s2) render(); });
+    QRCode.toDataURL(parentUrl(), { margin: 1, width: 360, errorCorrectionLevel: 'M' }).then(u => { S.qr = u; if (S.tab === 'setup') render(); }).catch(() => {});
+  }
   await Promise.all(['event', 'divisions', 'athletes'].map(loadTable));
   await loadRuns();
   S.loaded = true;
@@ -403,6 +441,11 @@ function arm(btn, label) { // two-tap confirm
 }
 
 document.addEventListener('click', async e => {
+  if (e.target.closest('#signOut')) {
+    const so = $('#signOut');
+    if (!arm(so, 'Tap again to sign out')) return;
+    await sb.auth.signOut(); S.session = null; toast('Signed out'); render(); return;
+  }
   const b = e.target.closest('[data-act],.tab'); if (!b) return;
   if (b.classList.contains('tab')) { setTab(b.dataset.tab); return; }
   const id = b.dataset.id;
@@ -410,6 +453,14 @@ document.addEventListener('click', async e => {
     case 'tab': setTab(b.dataset.tab); break;
     case 'view-div': S.viewDiv = id === S.event.active_division_id ? null : id; LS.set('viewDiv', S.viewDiv); render(); break;
     case 'follow-live': S.viewDiv = null; LS.set('viewDiv', null); render(); break;
+    case 'copy-link': {
+      const url = parentUrl();
+      try { await navigator.clipboard.writeText(url); toast('Link copied'); }
+      catch { const el = $('#parentLink'); if (el) { const r = document.createRange(); r.selectNodeContents(el); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); } toast('Select the link and copy it'); }
+      break;
+    }
+    case 'show-qr': $('#qrBig').hidden = false; $('#qrBigImg').src = S.qr; $('#qrBigEvent').textContent = S.event.name || 'Ninja Tournament'; $('#qrBigUrl').textContent = parentUrl(); break;
+    case 'hide-qr': $('#qrBig').hidden = true; break;
     case 'judge-flight': S.judgeFlight = id; LS.set('judgeFlight', id); renderMain(); break;
     case 'import-preview': buildPreview(); renderMain(); break;
     case 'import-cancel': S.preview = null; renderMain(); break;
@@ -443,6 +494,14 @@ document.addEventListener('click', async e => {
 document.addEventListener('submit', async e => {
   const f = e.target.closest('[data-form]'); if (!f) return; e.preventDefault();
   const kind = f.dataset.form;
+  if (kind === 'signin') {
+    const btn = f.querySelector('button'); btn.disabled = true;
+    const { data, error } = await sb.auth.signInWithPassword({ email: $('#siEmail').value.trim(), password: $('#siPass').value });
+    btn.disabled = false;
+    if (error) { toast('Sign in failed: ' + error.message); return; }
+    S.session = data.session; toast('Signed in'); render();
+    return;
+  }
   if (kind === 'add-athlete') {
     const name = $('#newName').value.trim(), bib = $('#newBib').value.trim(), div = $('#newDiv').value, flight = cleanFlight($('#newFlight').value);
     if (!name) { toast('Enter a name'); return; }
