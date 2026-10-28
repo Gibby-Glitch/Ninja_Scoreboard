@@ -44,7 +44,7 @@ const num = v => (v == null ? null : Number(v));
 const S = {
   event: {}, divisions: [], athletes: [], runs: [], loaded: false, session: null, authChecked: false, qr: '',
   tab: LS.get('tab', 'board'), viewDiv: LS.get('viewDiv', null), judgeFlight: LS.get('judgeFlight', 'all'),
-  search: '', pendingMain: false, saving: new Set(), runsDiv: undefined,
+  search: '', pendingMain: false, saving: new Set(), runsDiv: undefined, selected: new Set(), clearDiv: 'all',
   importText: '', importDiv: null, preview: null, importing: false,
 };
 
@@ -98,7 +98,7 @@ export function standings(divId) {
 /* ---------- rendering ---------- */
 function isEditing() {
   const a = document.activeElement;
-  return !!(a && $('#main').contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName));
+  return !!(a && $('#main').contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && a.type !== 'checkbox');
 }
 function render() {
   $('#eventName').textContent = S.event.name || 'Ninja Tournament';
@@ -256,11 +256,23 @@ function athletesView() {
     <span class="note">Puts the ${as.length} athletes in ${esc(d.name)} into flights in bib order. This replaces their current flights.</span>
     <div class="row"><label class="f" style="flex:0 0 150px">Athletes per flight<input id="perFlight" inputmode="numeric" autocomplete="off" placeholder="10"></label><button class="btn ghost" ${as.length ? '' : 'disabled'}>Split into flights</button></div></form></div>`;
   if (!as.length) return h + `<div class="empty" style="margin-top:16px"><strong>No athletes in ${esc(d.name)} yet</strong><span>Import a list or add them one at a time above.</span></div>`;
-  h += '<div class="list" style="margin-top:16px">';
+  // keep only selections that still exist in this division
+  const ids = new Set(as.map(a => a.id));
+  for (const id of [...S.selected]) if (!ids.has(id)) S.selected.delete(id);
+  const nSel = S.selected.size, allSel = nSel === as.length;
+  h += `<div class="bulkbar${nSel ? ' on' : ''}">
+    <label class="check"><input type="checkbox" id="selAll" data-sel="all" ${allSel ? 'checked' : ''}> <span>Select all ${as.length} in ${esc(d.name)}</span></label>
+    <span class="bulk-count">${nSel ? `${nSel} selected` : 'Tick athletes to delete several at once'}</span>
+    <span class="bulk-actions">${nSel ? `<button class="btn danger" data-act="del-selected">Delete ${nSel} selected</button><button class="btn ghost" data-act="clear-sel">Clear</button>` : ''}</span></div>`;
+  h += '<div class="list" style="margin-top:12px">';
   let last = null;
   for (const a of as) {
-    if ((a.flight || '') !== last) { last = a.flight || ''; h += `<div class="list-head">${esc(flightLabel(last))} <span class="muted">· ${as.filter(x => (x.flight || '') === last).length}</span></div>`; }
-    h += `<div class="item"><input id="ab_${a.id}" data-edit="athlete-bib" data-id="${a.id}" value="${esc(a.bib || '')}" placeholder="Bib" style="flex:0 0 70px" aria-label="Bib"><input id="an_${a.id}" data-edit="athlete-name" data-id="${a.id}" value="${esc(a.name)}" aria-label="Name"><input id="af_${a.id}" data-edit="athlete-flight" data-id="${a.id}" value="${esc(a.flight || '')}" placeholder="Flight" inputmode="numeric" style="flex:0 0 70px" aria-label="Flight"><select id="ad_${a.id}" data-edit="athlete-div" data-id="${a.id}" style="flex:0 1 160px" aria-label="Division">${divOptions(a.division_id)}</select><button class="btn danger" data-act="del-athlete" data-id="${a.id}">Remove</button></div>`;
+    if ((a.flight || '') !== last) {
+      last = a.flight || '';
+      const fa = as.filter(x => (x.flight || '') === last), fAll = fa.every(x => S.selected.has(x.id));
+      h += `<div class="list-head"><label class="check"><input type="checkbox" data-sel="flight" data-flight="${esc(last)}" ${fAll ? 'checked' : ''} aria-label="Select ${esc(flightLabel(last))}"> <span>${esc(flightLabel(last))}</span></label> <span class="muted">· ${fa.length}</span><button class="btn danger sm" data-act="del-flight" data-flight="${esc(last)}">Delete ${esc(flightLabel(last).toLowerCase())}</button></div>`;
+    }
+    h += `<div class="item${S.selected.has(a.id) ? ' sel' : ''}"><input type="checkbox" class="rowcheck" data-sel="one" data-id="${a.id}" ${S.selected.has(a.id) ? 'checked' : ''} aria-label="Select ${esc(a.name)}"><input id="ab_${a.id}" data-edit="athlete-bib" data-id="${a.id}" value="${esc(a.bib || '')}" placeholder="Bib" style="flex:0 0 70px" aria-label="Bib"><input id="an_${a.id}" data-edit="athlete-name" data-id="${a.id}" value="${esc(a.name)}" aria-label="Name"><input id="af_${a.id}" data-edit="athlete-flight" data-id="${a.id}" value="${esc(a.flight || '')}" placeholder="Flight" inputmode="numeric" style="flex:0 0 70px" aria-label="Flight"><select id="ad_${a.id}" data-edit="athlete-div" data-id="${a.id}" style="flex:0 1 160px" aria-label="Division">${divOptions(a.division_id)}</select><button class="btn danger" data-act="del-athlete" data-id="${a.id}">Remove</button></div>`;
   }
   return h + '</div>';
 }
@@ -277,7 +289,7 @@ function setupView() {
       <span class="muted" style="font-size:.85rem">${n} athletes${nf ? ` · ${nf} flights` : ''}</span>
       ${live ? `<button class="btn" data-act="div-final" data-id="${d.id}">Mark final</button>` : `<button class="btn ghost" data-act="div-live" data-id="${d.id}">Make live</button>`}
       ${!live && d.status === 'final' ? `<button class="btn ghost" data-act="div-reopen" data-id="${d.id}">Reopen</button>` : ''}
-      <button class="btn danger" data-act="del-div" data-id="${d.id}" ${n ? 'disabled title="Move or remove its athletes first"' : ''}>Delete</button></div>`;
+      <button class="btn danger" data-act="del-div" data-id="${d.id}" data-n="${n}">Delete</button></div>`;
   }).join('') || '<span class="muted">No divisions yet.</span>'}</div>
     <form class="row" data-form="add-div"><input id="newDivName" placeholder="Division name" style="flex:1 1 160px"><input id="newDivCourse" placeholder="Course name" style="flex:1 1 160px"><button class="btn">Add division</button></form></div>`;
   h += `<div class="panel qr-panel"><h3>Live results for parents</h3>
@@ -285,6 +297,20 @@ function setupView() {
     <div class="qr-row">${S.qr ? `<img class="qr" src="${S.qr}" alt="QR code for live results" width="180" height="180">` : '<div class="qr qr-wait">Making code…</div>'}
     <div class="qr-side"><code class="link" id="parentLink">${esc(parentUrl())}</code>
     <div class="row"><button class="btn ghost" data-act="copy-link">Copy link</button><button class="btn" data-act="show-qr">Show big QR code</button></div></div></div></div>`;
+  {
+    const target = S.clearDiv === 'all' ? null : S.divisions.find(x => x.id === S.clearDiv);
+    if (S.clearDiv !== 'all' && !target) S.clearDiv = 'all';
+    const na = target ? S.athletes.filter(a => a.division_id === target.id).length : S.athletes.length;
+    const where = target ? esc(target.name) : 'all divisions';
+    h += `<div class="panel danger-zone"><h3>Clear data</h3>
+      <span class="note">Use this after a practice run or between tournaments. Divisions and course names are kept. These can't be undone.</span>
+      <label class="f" style="max-width:280px">Which division<select id="clearDiv"><option value="all" ${S.clearDiv === 'all' ? 'selected' : ''}>All divisions</option>${divOptions(S.clearDiv)}</select></label>
+      <div class="row">
+        <button class="btn danger" data-act="clear-scores">Delete all scores in ${where}</button>
+        <button class="btn danger" data-act="clear-athletes" ${na ? '' : 'disabled'}>Delete ${na} athletes in ${where}</button>
+      </div>
+      <span class="note">Deleting athletes also deletes their scores. Deleting scores keeps the athletes so you can run again.</span></div>`;
+  }
   h += `<div class="panel"><h3>Using it on iPads and phones</h3><p class="note" style="margin:0">Open the site on every device. Judges score on the Judge tab and can pick their flight. The Winners tab shows the overall top 20 for the division and updates live on all screens. On iPad, Share → Add to Home Screen makes it open full screen.</p></div></div>`;
   return h;
 }
@@ -433,6 +459,20 @@ async function saveRun(aid) {
   }
 }
 
+async function deleteIn(table, col, values) {
+  for (let i = 0; i < values.length; i += 200) {
+    const r = await sb.from(table).delete().in(col, values.slice(i, i + 200));
+    if (r.error) return r;
+  }
+  return null;
+}
+async function deleteAthletes(ids, msg) {
+  if (!ids.length) return false;
+  const ok = await write(() => deleteIn('athletes', 'id', ids), msg);
+  if (ok) { ids.forEach(id => S.selected.delete(id)); S.athletes = S.athletes.filter(a => !ids.includes(a.id)); S.runs = S.runs.filter(r => !ids.includes(r.athlete_id)); render(); }
+  return ok;
+}
+
 function arm(btn, label) { // two-tap confirm
   if (btn.dataset.armed) return true;
   btn.dataset.armed = '1'; const old = btn.textContent; btn.textContent = label; btn.classList.add('armed');
@@ -451,7 +491,7 @@ document.addEventListener('click', async e => {
   const id = b.dataset.id;
   switch (b.dataset.act) {
     case 'tab': setTab(b.dataset.tab); break;
-    case 'view-div': S.viewDiv = id === S.event.active_division_id ? null : id; LS.set('viewDiv', S.viewDiv); render(); break;
+    case 'view-div': S.selected.clear(); S.viewDiv = id === S.event.active_division_id ? null : id; LS.set('viewDiv', S.viewDiv); render(); break;
     case 'follow-live': S.viewDiv = null; LS.set('viewDiv', null); render(); break;
     case 'copy-link': {
       const url = parentUrl();
@@ -481,8 +521,45 @@ document.addEventListener('click', async e => {
       }, 'Marked final');
       S.viewDiv = id; LS.set('viewDiv', id); render(); break;
     case 'div-reopen': await write(() => sb.from('divisions').update({ status: 'upcoming' }).eq('id', id)); break;
-    case 'del-div': if (!arm(b, 'Tap again to delete')) break;
-      await write(() => sb.from('divisions').delete().eq('id', id), 'Division deleted'); break;
+    case 'del-div': {
+      const n = Number(b.dataset.n) || 0;
+      if (!arm(b, n ? `Tap again: delete division + ${n} athletes` : 'Tap again to delete')) break;
+      const dn = S.divisions.find(x => x.id === id)?.name || 'Division';
+      await write(async () => {
+        const ids = S.athletes.filter(a => a.division_id === id).map(a => a.id);
+        const r = await deleteIn('athletes', 'id', ids); if (r) return r;
+        if (S.event.active_division_id === id) { const r2 = await sb.from('event').update({ active_division_id: null }).eq('id', 1); if (r2.error) return r2; }
+        return sb.from('divisions').delete().eq('id', id);
+      }, `Deleted ${dn}`);
+      break;
+    }
+    case 'clear-sel': S.selected.clear(); renderMain(); break;
+    case 'del-selected': {
+      const ids = [...S.selected];
+      if (!arm(b, `Tap again to delete ${ids.length}`)) break;
+      await deleteAthletes(ids, `Deleted ${ids.length} athletes`);
+      break;
+    }
+    case 'del-flight': {
+      const d = viewDiv(), f = b.dataset.flight;
+      const ids = divAthletes(d.id).filter(a => (a.flight || '') === f).map(a => a.id);
+      if (!arm(b, `Tap again to delete ${ids.length}`)) break;
+      await deleteAthletes(ids, `Deleted ${flightLabel(f)} (${ids.length} athletes)`);
+      break;
+    }
+    case 'clear-athletes': {
+      const ids = S.athletes.filter(a => S.clearDiv === 'all' || a.division_id === S.clearDiv).map(a => a.id);
+      if (!arm(b, `Tap again to delete ${ids.length} athletes`)) break;
+      await deleteAthletes(ids, `Deleted ${ids.length} athletes and their scores`);
+      break;
+    }
+    case 'clear-scores': {
+      if (!arm(b, 'Tap again to delete scores')) break;
+      const divIds = S.clearDiv === 'all' ? S.divisions.map(x => x.id) : [S.clearDiv];
+      const ok = await write(() => deleteIn('runs', 'division_id', divIds), 'Scores deleted');
+      if (ok) { S.runs = S.runs.filter(r => !divIds.includes(r.division_id)); render(); }
+      break;
+    }
     case 'del-athlete': {
       if (!arm(b, 'Tap again to remove')) break;
       const a = S.athletes.find(x => x.id === id);
@@ -540,6 +617,17 @@ document.addEventListener('change', e => {
     reader.readAsText(file);
     return;
   }
+  if (t.dataset.sel) {
+    const d = viewDiv(); const as = d ? divAthletes(d.id) : [];
+    let group = [];
+    if (t.dataset.sel === 'one') group = [t.dataset.id];
+    else if (t.dataset.sel === 'all') group = as.map(a => a.id);
+    else if (t.dataset.sel === 'flight') group = as.filter(a => (a.flight || '') === t.dataset.flight).map(a => a.id);
+    group.forEach(id => (t.checked ? S.selected.add(id) : S.selected.delete(id)));
+    const y = window.scrollY; renderMain(); window.scrollTo(0, y);
+    return;
+  }
+  if (t.id === 'clearDiv') { S.clearDiv = t.value; renderMain(); return; }
   if (t.id === 'importDiv') { S.importDiv = t.value; if (S.preview) { buildPreview(); renderMain(); } return; }
   const k = t.dataset.edit, id = t.dataset.id, v = t.value.trim(); if (!k) return;
   if (k === 'event-name') write(() => sb.from('event').upsert({ id: 1, name: v || 'Ninja Tournament', active_division_id: S.event.active_division_id ?? null }));
